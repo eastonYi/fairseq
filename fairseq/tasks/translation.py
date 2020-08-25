@@ -159,7 +159,9 @@ class TranslationTask(FairseqTask):
         """Add task-specific arguments to the parser."""
         # fmt: off
         parser.add_argument('data', help='colon separated path to data directories list, \
-                            will be iterated upon during epochs in round-robin manner')
+                            will be iterated upon during epochs in round-robin manner; \
+                            however, valid and test data are always in the first directory to \
+                            avoid the need for repeating them in all directories')
         parser.add_argument('-s', '--source-lang', default=None, metavar='SRC',
                             help='source language')
         parser.add_argument('-t', '--target-lang', default=None, metavar='TARGET',
@@ -246,6 +248,9 @@ class TranslationTask(FairseqTask):
         """
         paths = utils.split_paths(self.args.data)
         assert len(paths) > 0
+        if split != getattr(self.args, "train_subset", None):
+            # if not training data set, use the first shard for valid and test
+            paths = paths[:1]
         data_path = paths[(epoch - 1) % len(paths)]
 
         # infer langcode
@@ -265,8 +270,10 @@ class TranslationTask(FairseqTask):
             shuffle=(split != 'test'),
         )
 
-    def build_dataset_for_inference(self, src_tokens, src_lengths):
-        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)
+    def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
+        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary,
+                                   tgt_dict=self.target_dictionary,
+                                   constraints=constraints)
 
     def build_model(self, args):
         model = super().build_model(args)
@@ -372,7 +379,7 @@ class TranslationTask(FairseqTask):
                 s = self.tokenizer.decode(s)
             return s
 
-        gen_out = self.inference_step(generator, [model], sample, None)
+        gen_out = self.inference_step(generator, [model], sample, prefix_tokens=None)
         hyps, refs = [], []
         for i in range(len(gen_out)):
             hyps.append(decode(gen_out[i][0]['tokens']))
