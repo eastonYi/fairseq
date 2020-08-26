@@ -1,5 +1,8 @@
-CUDA_VISIBLE_DEVICES=0,1 python train.py data/libri/manifest \
---save-dir ./exp/wav2vec2_base_pretrain --fp16 --num-workers 6 --task audio_pretraining --criterion wav2vec --arch wav2vec2 \
+SAVE_DIR=./exp/libri/base_pretrain
+DATA_DIR=/data3/easton/data/fairseq/libri/manifest
+
+CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA_DIR \
+--save-dir $SAVE_DIR --fp16 --num-workers 6 --task audio_pretraining --criterion wav2vec --arch wav2vec2 \
 --log-keys '["prob_perplexity","code_perplexity","temp"]' --quantize-targets --extractor-mode default \
 --conv-feature-layers '[(512, 10, 5)] + [(512, 3, 2)] * 4 + [(512,2,2)] * 2' --final-dim 256 --latent-vars 320 \
 --latent-groups 2 --latent-temp '(2,0.5,0.999995)' --infonce --optimizer adam \
@@ -10,5 +13,3 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py data/libri/manifest \
 --max-sample-size 250000 --min-sample-size 32000 --dropout 0.1 --attention-dropout 0.1 --weight-decay 0.01 \
 --max-tokens 1400000 --max-update 400000 --skip-invalid-size-inputs-valid-test --ddp-backend no_c10d --update-freq 8 \
 --log-interval 10 --log-format simple
-
-#### --reset-optimizer
