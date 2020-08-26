@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES=0 python train.py data/libri/finetune/ --save-dir exp/base_finetune/ --fp16 \
 --post-process letter --valid-subset "dev_other" --no-epoch-checkpoints --best-checkpoint-metric uer --num-workers 4 \
---max-update 800 --sentence-avg --task audio_pretraining --arch wav2vec_ctc --w2v-path exp/base_finetune/checkpoint_best.pt \
+--max-update 80000 --sentence-avg --task audio_pretraining --arch wav2vec_ctc --w2v-path exp/base_finetune/checkpoint_best.pt \
 --labels ltr --apply-mask --mask-selection static --mask-other 0 --mask-length 10 --mask-prob 0.5 --layerdrop 0.1 \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 --mask-channel-prob 0.5 --zero-infinity \
 --feature-grad-mult 0.0 --freeze-finetune-updates 10000 --validate-after-updates 10000 --optimizer adam \

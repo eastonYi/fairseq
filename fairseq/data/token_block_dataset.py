@@ -50,7 +50,6 @@ class TokenBlockDataset(FairseqDataset):
         except ImportError:
             raise ImportError(
                 'Please build Cython components with: `pip install --editable .` '
-                'or `python setup.py build_ext --inplace`'
             )
 
         super().__init__()
