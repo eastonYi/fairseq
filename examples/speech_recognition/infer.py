@@ -49,9 +49,10 @@ output units",
         "--rnnt_len_penalty", default=-0.5, help="rnnt length penalty on word level"
     )
     parser.add_argument(
-        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm"], help="use a w2l decoder"
+        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm", "ctc_decoder"], help="use a w2l decoder"
     )
     parser.add_argument("--lexicon", help="lexicon for w2l decoder")
+    parser.add_argument("--iscn", action='store_true', help="output char")
     parser.add_argument("--unit-lm", action='store_true', help="if using a unit lm")
     parser.add_argument("--kenlm-model", "--lm-model", help="lm model for w2l decoder")
     parser.add_argument("--beam-threshold", type=float, default=25.0)
@@ -107,33 +108,43 @@ def get_dataset_itr(args, task, models):
 
 
 def process_predictions(
-        args, hypos, sp, tgt_dict, target_tokens, res_files, speaker, id
+        args, hypos, sp, tgt_dict, target_tokens, res_files, speaker, id, labels
 ):
     for hypo in hypos[: min(len(hypos), args.nbest)]:
-        hyp_pieces = tgt_dict.string(hypo["tokens"].int().cpu())
+        hyp_words = []
 
         if "words" in hypo:
             hyp_words = " ".join(hypo["words"])
+            for hyp_word in hypo["words"]:
+                if '[' not in hyp_word and '<' not in hyp_word:
+                    continue
+                hyp_words.append(hyp_word)
         else:
-            hyp_words = post_process(hyp_pieces, args.remove_bpe)
+            hyp_pieces = tgt_dict.string(hypo["tokens"].int().cpu())
+            for hypo_chr in hyp_pieces.split():
+                if '[' not in hypo_chr and '<' not in hypo_chr:
+                    hyp_words.append(hypo_chr)
+        tgt_words = []
+        for tgt_word in labels[id].strip().split():
+            if '[' not in tgt_word and '<' not in tgt_word:
+                tgt_words.append(tgt_word)
+
+        tgt_words = ' '.join(tgt_words)
+        hyp_words = post_process(' '.join(hyp_words), args.labels)
+
+        if args.iscn:
+            hyp_words = ' '.join(list(hyp_words.replace(' ', '')))
+            tgt_words = ' '.join(list(tgt_words.replace(' ', '')))
 
         if res_files is not None:
-            print(
-                "{} ({}-{})".format(hyp_pieces, speaker, id), file=res_files["hypo.units"]
-            )
             print("{} ({}-{})".format(hyp_words, speaker, id), file=res_files["hypo.words"])
 
-        tgt_pieces = tgt_dict.string(target_tokens)
-        tgt_words = post_process(tgt_pieces, args.remove_bpe)
-
-        if res_files is not None:
-            print("{} ({}-{})".format(tgt_pieces, speaker, id), file=res_files["ref.units"])
-            print("{} ({}-{})".format(tgt_words, speaker, id), file=res_files["ref.words"])
-            # only score top hypothesis
-            if not args.quiet:
-                logger.debug("HYPO:" + hyp_words)
-                logger.debug("TARGET:" + tgt_words)
-                logger.debug("___________________")
+        print("{} ({}-{})".format(tgt_words, speaker, id), file=res_files["ref.words"])
+        # only score top hypothesis
+        if not args.quiet:
+            logger.debug("HYPO:" + hyp_words)
+            logger.debug("TARGET:" + tgt_words)
+            logger.debug("___________________")
 
         hyp_words = hyp_words.split()
         tgt_words = tgt_words.split()
@@ -157,9 +168,7 @@ def prepare_result_files(args):
 
     return {
         "hypo.words": get_res_file("hypo.word"),
-        "hypo.units": get_res_file("hypo.units"),
-        "ref.words": get_res_file("ref.word"),
-        "ref.units": get_res_file("ref.units"),
+        "ref.words": get_res_file("ref.word")
     }
 
 
@@ -220,7 +229,7 @@ class ExistingEmissionsDecoder(object):
         self.decoder = decoder
         self.emissions = emissions
 
-    def generate(self, models, sample, **unused):
+    def generate(self, models, sample, prefix_tokens=None):
         ids = sample["id"].cpu().numpy()
         try:
             emissions = np.stack(self.emissions[ids])
@@ -249,6 +258,12 @@ def main(args, task=None, model_state=None):
                 args.data, args.gen_subset, len(task.dataset(args.gen_subset))
             )
         )
+
+    label_path = os.path.join(args.data, "{}.word".format(args.gen_subset))
+    labels = []
+    with open(label_path, "r") as f:
+        for line in f:
+            labels.append(line)
 
     # Set dictionary
     tgt_dict = task.target_dictionary
@@ -295,6 +310,10 @@ def main(args, task=None, model_state=None):
             from examples.speech_recognition.w2l_decoder import W2lFairseqLMDecoder
 
             return W2lFairseqLMDecoder(args, task.target_dictionary)
+        elif w2l_decoder == "ctc_decoder":
+            from examples.speech_recognition.ctc_decoder import CTCDecoder
+
+            return CTCDecoder(args, task.target_dictionary)
         else:
             return super().build_generator(args)
 
@@ -356,7 +375,8 @@ def main(args, task=None, model_state=None):
                     encoder_out = models[0](**sample["net_input"])
                     feat = encoder_out["encoder_out"].transpose(0, 1).cpu().numpy()
                     for i, id in enumerate(sample["id"]):
-                        padding = encoder_out["encoder_padding_mask"][i].cpu().numpy() if encoder_out["encoder_padding_mask"] is not None else None
+                        padding = encoder_out["encoder_padding_mask"][i].cpu().numpy() \
+                        if encoder_out["encoder_padding_mask"] is not None else None
                         features[id.item()] = (feat[i], padding)
                     continue
             hypos = task.inference_step(generator, models, sample, prefix_tokens)
@@ -373,7 +393,7 @@ def main(args, task=None, model_state=None):
                 )
                 # Process top predictions
                 errs, length = process_predictions(
-                    args, hypos[i], None, tgt_dict, target_tokens, res_files, speaker, id
+                    args, hypos[i], None, tgt_dict, target_tokens, res_files, speaker, id, labels
                 )
                 errs_t += errs
                 lengths_t += length

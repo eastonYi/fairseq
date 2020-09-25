@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from fairseq import utils
+from fairseq import utils, checkpoint_utils, tasks
 from fairseq.models import (
     FairseqLanguageModel, register_model, register_model_architecture
 )
@@ -17,6 +17,7 @@ DEFAULT_MAX_TARGET_POSITIONS = 1e5
 class LSTMLanguageModel(FairseqLanguageModel):
     def __init__(self, decoder):
         super().__init__(decoder)
+        self.dim_output = decoder.dim_output
 
     @staticmethod
     def add_args(parser):
@@ -53,7 +54,7 @@ class LSTMLanguageModel(FairseqLanguageModel):
                             help='share decoder input and output embeddings')
 
     @classmethod
-    def build_model(cls, args, task):
+    def build_model(cls, args, task, dictionary=None):
         """Build a new model instance."""
 
         # make sure all arguments are present in older models
@@ -92,7 +93,7 @@ class LSTMLanguageModel(FairseqLanguageModel):
                     )
 
         decoder = LSTMDecoder(
-            dictionary=task.dictionary,
+            dictionary=dictionary if dictionary else task.dictionary,
             embed_dim=args.decoder_embed_dim,
             hidden_size=args.decoder_hidden_size,
             out_embed_dim=args.decoder_out_embed_dim,
@@ -110,6 +111,20 @@ class LSTMLanguageModel(FairseqLanguageModel):
             max_target_positions=max_target_positions,
             residuals=args.residuals
         )
+
+        if getattr(args, "lm_path", None):
+            # args.lm_path = '../libri/wav2vec2_small.pt'
+            print('load LSTM_LM from {}'.format(args.lm_path))
+            state = checkpoint_utils.load_checkpoint_to_cpu(args.lm_path)
+            lm_args = state["args"]
+            lm_args.data = args.data
+            assert getattr(lm_args, "lm_path", None) is None
+
+            task = tasks.setup_task(lm_args)
+            decoder = task.build_model(lm_args)
+            print('restore LSTM_LM from {}'.format(args.lm_path))
+            decoder.load_state_dict(state["model"], strict=True)
+        decoder.dim_output = len(task.dictionary)
 
         return cls(decoder)
 

@@ -275,8 +275,8 @@ class FairseqEncoderDecoderModel(BaseFairseqModel):
 
         self.encoder = encoder
         self.decoder = decoder
-        assert isinstance(self.encoder, FairseqEncoder)
-        assert isinstance(self.decoder, FairseqDecoder)
+        # assert isinstance(self.encoder, FairseqEncoder)
+        # assert isinstance(self.decoder, FairseqDecoder)
 
     def forward(self, src_tokens, src_lengths, prev_output_tokens, **kwargs):
         """
@@ -446,7 +446,7 @@ class FairseqLanguageModel(BaseFairseqModel):
     def __init__(self, decoder):
         super().__init__()
         self.decoder = decoder
-        assert isinstance(self.decoder, FairseqDecoder)
+        # assert isinstance(self.decoder, FairseqDecoder)
 
     def forward(self, src_tokens, **kwargs):
         """

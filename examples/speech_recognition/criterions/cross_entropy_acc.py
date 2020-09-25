@@ -39,7 +39,7 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
         # N, T, D -> N * T, D
         lprobs = lprobs.view(-1, lprobs.size(-1))
         loss = F.nll_loss(
-            lprobs, target, ignore_index=self.padding_idx, reduction=reduction
+            lprobs, target.long(), ignore_index=self.padding_idx, reduction=reduction
         )
         return lprobs, loss
 
@@ -61,7 +61,6 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
             "sample_size": sample_size,
             "correct": utils.item(correct.data),
             "total": utils.item(total.data),
-            "nframes": torch.sum(sample["net_input"]["src_lengths"]).item(),
         }
 
         return sample_size, logging_output
@@ -108,7 +107,6 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
-        nframes = sum(log.get("nframes", 0) for log in logging_outputs)
         agg_output = {
             "loss": loss_sum / sample_size / math.log(2) if sample_size > 0 else 0.0,
             # if args.sentence_avg, then sample_size is nsentences, then loss
@@ -116,7 +114,6 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
             # becomes per-output token loss
             "ntokens": ntokens,
             "nsentences": nsentences,
-            "nframes": nframes,
             "sample_size": sample_size,
             "acc": correct_sum * 100.0 / total_sum if total_sum > 0 else 0.0,
             "correct": correct_sum,

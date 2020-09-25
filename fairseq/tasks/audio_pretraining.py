@@ -8,25 +8,12 @@
 import os
 import sys
 
-from fairseq.data import FileAudioDataset, Dictionary, AddTargetDataset
-from . import LegacyFairseqTask, register_task
-
-
-class LabelEncoder(object):
-    def __init__(self, dictionary):
-        self.dictionary = dictionary
-
-    def __call__(self, label):
-        return self.dictionary.encode_line(
-            label, append_eos=False, add_if_not_exist=False
-        )
+from fairseq.data import FileAudioDataset
+from . import FairseqTask, register_task
 
 
 @register_task("audio_pretraining")
-class AudioPretrainingTask(LegacyFairseqTask):
-    """
-
-    """
+class AudioUnsuperviseTrainingTask(FairseqTask):
 
     @staticmethod
     def add_args(parser):
@@ -62,28 +49,6 @@ class AudioPretrainingTask(LegacyFairseqTask):
             help="pad shorter samples instead of cropping",
         )
 
-        parser.add_argument(
-            "--labels",
-            type=str,
-            default=None,
-            help="extension of the label file to load, if any",
-        )
-
-    def __init__(self, args, source_dictionary=None):
-        super().__init__(args)
-        self._target_dictionary = None
-        self._source_dictionary = source_dictionary
-        self.is_ctc = args.criterion == "ctc"
-
-    @classmethod
-    def setup_task(cls, args, **kwargs):
-        """Setup the task (e.g., load dictionaries).
-
-        Args:
-            args (argparse.Namespace): parsed command-line arguments
-        """
-        return cls(args)
-
     def load_dataset(self, split, **kwargs):
         """Load a given dataset split.
 
@@ -100,37 +65,6 @@ class AudioPretrainingTask(LegacyFairseqTask):
             pad=self.args.labels is not None or self.args.enable_padding,
             normalize=self.args.normalize,
         )
-
-        if self.args.labels:
-            dict_path = os.path.join(self.args.data, f"dict.{self.args.labels}.txt")
-            self._target_dictionary = Dictionary.load(dict_path)
-            label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
-            labels = []
-            with open(label_path, "r") as f:
-                for line in f:
-                    labels.append(line)
-
-            process_label = LabelEncoder(self.target_dictionary)
-
-            self.datasets[split] = AddTargetDataset(
-                self.datasets[split],
-                labels,
-                pad=self.target_dictionary.pad(),
-                eos=self.target_dictionary.eos(),
-                batch_targets=True,
-                process_label=process_label,
-                add_to_input=not self.is_ctc,
-            )
-
-    @property
-    def source_dictionary(self):
-        return self._source_dictionary
-
-    @property
-    def target_dictionary(self):
-        """Return the :class:`~fairseq.data.Dictionary` for the language
-        model."""
-        return self._target_dictionary
 
     def max_positions(self):
         """Maximum input length supported by the encoder."""

@@ -19,7 +19,7 @@ from fairseq.logging.meters import safe_round
 class CtcCriterion(FairseqCriterion):
     def __init__(self, task, wer_args, zero_infinity, sentence_avg, remove_bpe):
         super().__init__(task)
-        self.blank_idx = task.target_dictionary.bos()
+        self.blank_idx = task.target_dictionary.index("<ctc_blank>")
         self.pad_idx = task.target_dictionary.pad()
         self.eos_idx = task.target_dictionary.eos()
         self.post_process = remove_bpe if remove_bpe else "letter"

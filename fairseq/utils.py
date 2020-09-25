@@ -640,3 +640,44 @@ def eval_bool(x, default=False):
         return bool(eval(x))
     except TypeError:
         return default
+
+
+# pytorch
+def ctc_shrink(hidden, logits, pad, blk, at_least_one=False):
+    """only count the first one for the repeat freams
+    """
+    device = logits.device
+    B, T, V = hidden.size()
+    _B, _T, _ = logits.size()
+    assert B == _B and T == _T
+    tokens = torch.argmax(logits, -1)
+    # intermediate vars along time
+    list_fires = []
+    token_prev = torch.ones(B).to(device) * -1
+    blk_batch = torch.ones(B).to(device) * blk
+    pad_batch = torch.ones(B).to(device) * pad
+
+    for t in range(T):
+        token = tokens[:, t]
+        fire_place = torch.logical_and(token != blk_batch, token != token_prev)
+        fire_place = torch.logical_and(fire_place, token != pad_batch)
+        list_fires.append(fire_place)
+        token_prev = token
+
+    fires = torch.stack(list_fires, 1)
+    len_decode = fires.sum(-1)
+    if at_least_one:
+        len_decode = torch.where(len_decode.eq(0),
+                                 torch.ones_like(len_decode),
+                                 len_decode)
+    max_decode_len = len_decode.max()
+    list_ls = []
+
+    for b in range(B):
+        l = hidden[b, :, :].index_select(0, torch.where(fires[b])[0])
+        pad_l = torch.zeros([max_decode_len - l.size(0), V]).to(device)
+        list_ls.append(torch.cat([l, pad_l], 0))
+
+    hidden_shrunk = torch.stack(list_ls, 0)
+
+    return hidden_shrunk, len_decode
