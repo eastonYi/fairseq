@@ -8,7 +8,6 @@ import os
 import re
 import sys
 
-import torch
 from fairseq.data import Dictionary
 from fairseq.tasks import register_task, LegacyFairseqTask
 from examples.speech_recognition.data import AsrDataset
@@ -58,7 +57,10 @@ def get_asr_dataset_from_json(data_json_path, tgt_dict):
             tgt.append(res)
             aud_paths.append(s[1]["input"]["path"])
             ids.append(s)
-            m = re.search("(.+?)-(.+?)-(.+?)", s[0])
+            if '-' in s[0]:
+                m = re.search("(.+?)-(.+?)-(.+?)", s[0])
+            else:
+                m = re.search("(BAC[0-9]+)(S[0-9]+)(W[0-9]+)", s[0])
             speakers.append(m.group(1) + "_" + m.group(2))
             frame_sizes.append(s[1]["input"]["length_ms"])
 
@@ -78,10 +80,12 @@ class SpeechRecognitionTask(LegacyFairseqTask):
     def add_args(parser):
         """Add task-specific arguments to the parser."""
         parser.add_argument("data", help="path to data directory")
+        parser.add_argument('--dict', type=str, metavar='N',
+                            help='max number of frames in the source sequence')
         parser.add_argument(
             "--silence-token", default="\u2581", help="token for silence (used by w2l)"
         )
-        parser.add_argument('--max-source-positions', default=sys.maxsize, type=int, metavar='N',
+        parser.add_argument('--max-source-positions', default=9999, type=int, metavar='N',
                             help='max number of frames in the source sequence')
         parser.add_argument('--max-target-positions', default=1024, type=int, metavar='N',
                             help='max number of tokens in the target sequence')
@@ -93,7 +97,7 @@ class SpeechRecognitionTask(LegacyFairseqTask):
     @classmethod
     def setup_task(cls, args, **kwargs):
         """Setup the task (e.g., load dictionaries)."""
-        dict_path = os.path.join(args.data, "dict.txt")
+        dict_path = os.path.join(args.data, args.dict)
         if not os.path.isfile(dict_path):
             raise FileNotFoundError("Dict not found: {}".format(dict_path))
         tgt_dict = Dictionary.load(dict_path)
@@ -104,7 +108,7 @@ class SpeechRecognitionTask(LegacyFairseqTask):
             for i in range(1, args.max_replabel + 1):
                 tgt_dict.add_symbol(replabel_symbol(i))
 
-        print("| dictionary: {} types".format(len(tgt_dict)))
+        print("dictionary: {} types".format(len(tgt_dict)))
         return cls(args, tgt_dict)
 
     def load_dataset(self, split, combine=False, **kwargs):

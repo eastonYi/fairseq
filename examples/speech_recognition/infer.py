@@ -19,6 +19,7 @@ import torch
 from fairseq import checkpoint_utils, options, progress_bar, utils, tasks
 from fairseq.logging.meters import StopwatchMeter, TimeMeter
 from fairseq.data.data_utils import post_process
+from examples import speech_recognition
 
 
 logging.basicConfig()
@@ -49,7 +50,8 @@ output units",
         "--rnnt_len_penalty", default=-0.5, help="rnnt length penalty on word level"
     )
     parser.add_argument(
-        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm", "ctc_decoder"], help="use a w2l decoder"
+        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm", "ctc_decoder", "seq2seq_decoder"],
+        help="use a w2l decoder"
     )
     parser.add_argument("--lexicon", help="lexicon for w2l decoder")
     parser.add_argument("--iscn", action='store_true', help="output char")
@@ -108,7 +110,7 @@ def get_dataset_itr(args, task, models):
 
 
 def process_predictions(
-        args, hypos, sp, tgt_dict, target_tokens, res_files, speaker, id, labels
+        args, hypos, sp, tgt_dict, target_tokens, res_files, speaker, id, trans
 ):
     for hypo in hypos[: min(len(hypos), args.nbest)]:
         hyp_words = []
@@ -125,12 +127,12 @@ def process_predictions(
                 if '[' not in hypo_chr and '<' not in hypo_chr:
                     hyp_words.append(hypo_chr)
         tgt_words = []
-        for tgt_word in labels[id].strip().split():
+        for tgt_word in trans.strip().split():
             if '[' not in tgt_word and '<' not in tgt_word:
                 tgt_words.append(tgt_word)
 
         tgt_words = ' '.join(tgt_words)
-        hyp_words = post_process(' '.join(hyp_words), args.labels)
+        hyp_words = post_process(' '.join(hyp_words), args.remove_bpe)
 
         if args.iscn:
             hyp_words = ' '.join(list(hyp_words.replace(' ', '')))
@@ -259,11 +261,16 @@ def main(args, task=None, model_state=None):
             )
         )
 
-    label_path = os.path.join(args.data, "{}.word".format(args.gen_subset))
-    labels = []
-    with open(label_path, "r") as f:
-        for line in f:
-            labels.append(line)
+    all_trans = []
+    if 'audio' in args.task:
+        """
+            tasks that load tsv data
+            trans_path: raw trans (before bpe)
+        """
+        trans_path = os.path.join(args.data, "{}.word".format(args.gen_subset))
+        with open(trans_path, "r") as f:
+            for line in f:
+                all_trans.append(line)
 
     # Set dictionary
     tgt_dict = task.target_dictionary
@@ -314,6 +321,10 @@ def main(args, task=None, model_state=None):
             from examples.speech_recognition.ctc_decoder import CTCDecoder
 
             return CTCDecoder(args, task.target_dictionary)
+        elif w2l_decoder == "seq2seq_decoder":
+            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
+
+            return Seq2seqDecoder(args, task.target_dictionary)
         else:
             return super().build_generator(args)
 
@@ -391,9 +402,10 @@ def main(args, task=None, model_state=None):
                 target_tokens = (
                     utils.strip_pad(toks, tgt_dict.pad()).int().cpu()
                 )
+                trans = all_trans[id] if all_trans else task.dataset(args.gen_subset).ids[sample_id][1]['output']['text'].strip()
                 # Process top predictions
                 errs, length = process_predictions(
-                    args, hypos[i], None, tgt_dict, target_tokens, res_files, speaker, id, labels
+                    args, hypos[i], None, tgt_dict, target_tokens, res_files, speaker, id, trans
                 )
                 errs_t += errs
                 lengths_t += length

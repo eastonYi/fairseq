@@ -755,6 +755,15 @@ class EnsembleModel(nn.Module):
     def max_decoder_positions(self):
         return min([m.max_decoder_positions() for m in self.models])
 
+    # @torch.jit.export
+    # def forward_encoder(self, net_input: Dict[str, Tensor]):
+    #     feature = net_input["src_tokens"]
+    #     feature_lengths = net_input["src_lengths"]
+    #     x, len_x = self.models[0].convSub(feature, feature_lengths)
+    #     encoder_out = self.models[0].encoder(x, src_lengths=len_x)
+    #
+    #     return [encoder_out]
+
     @torch.jit.export
     def forward_encoder(self, net_input: Dict[str, Tensor]):
         if not self.has_encoder():

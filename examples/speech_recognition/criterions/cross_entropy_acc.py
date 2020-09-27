@@ -88,14 +88,61 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
             as net_output.
             We need to make a change to support all FairseqEncoder models.
         """
-        net_output = model(**sample["net_input"])
-        target = model.get_targets(sample, net_output)
+        encoder_output = model.get_encoder_output(sample["net_input"])
+        input_lengths = (~encoder_output.encoder_padding_mask).sum(-1)
+        target = sample["target"]
+        decoder_out = model.decoder(
+            prev_output_tokens=sample["net_input"]["prev_output_tokens"],
+            encoder_out=encoder_output,
+            src_lengths=input_lengths
+        )
         lprobs, loss = self.compute_loss(
-            model, net_output, target, reduction, log_probs
+            model, decoder_out, target, reduction, log_probs
         )
         sample_size, logging_output = self.get_logging_output(
             sample, target, lprobs, loss
         )
+
+        if not model.training and loss/sample_size < 2.0:
+            import editdistance
+
+            with torch.no_grad():
+                lprobs = lprobs.float().cpu()
+
+                c_err = 0
+                c_len = 0
+                for lp, t, inp_l in zip(
+                    lprobs,
+                    sample["target"],
+                    input_lengths,
+                ):
+                    lp = lp[:inp_l].unsqueeze(0)
+
+                    decoded = self.w2l_decoder.decode(lp)
+                    if len(decoded) < 1:
+                        decoded = None
+                    else:
+                        decoded = decoded[0]
+                        if len(decoded) < 1:
+                            decoded = None
+                        else:
+                            decoded = decoded[0]
+
+                    p = (t != self.task.target_dictionary.pad()) & (
+                        t != self.task.target_dictionary.eos()
+                    )
+                    targ = t[p]
+                    targ_units_arr = targ.tolist()
+
+                    toks = lp.argmax(dim=-1).unique_consecutive()
+                    pred_units_arr = toks.tolist()
+
+                    c_err += editdistance.eval(pred_units_arr, targ_units_arr)
+                    c_len += len(targ_units_arr)
+
+                logging_output["c_errors"] = c_err
+                logging_output["c_total"] = c_len
+
         return loss, sample_size, logging_output
 
     @staticmethod
@@ -107,8 +154,10 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
+        c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
+        c_total = sum(log.get("c_total", 0) for log in logging_outputs)
         agg_output = {
-            "loss": loss_sum / sample_size / math.log(2) if sample_size > 0 else 0.0,
+            "loss": loss_sum / sample_size if sample_size > 0 else 0.0,
             # if args.sentence_avg, then sample_size is nsentences, then loss
             # is per-sentence loss; else sample_size is ntokens, the loss
             # becomes per-output token loss
@@ -121,7 +170,10 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
             # total is the number of validate tokens
         }
         if sample_size != ntokens:
-            agg_output["nll_loss"] = loss_sum / ntokens / math.log(2)
+            agg_output["nll_loss"] = loss_sum / ntokens
+
+        if c_total > 0:
+            agg_output["uer"] = c_errors / c_total
         # loss: per output token loss
         # nll_loss: per sentence loss
         return agg_output

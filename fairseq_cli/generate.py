@@ -21,6 +21,8 @@ from fairseq.logging import progress_bar
 from fairseq.logging.meters import StopwatchMeter, TimeMeter
 from fairseq.data import encoders
 
+from examples import speech_recognition, language_model
+
 
 def main(args):
     assert args.path is not None, '--path required for generation!'

@@ -35,7 +35,7 @@ from .transformer import (
     base_architecture,
 )
 
-DEFAULT_MAX_SOURCE_POSITIONS = 1024
+DEFAULT_MAX_SOURCE_POSITIONS = 2048
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
@@ -173,6 +173,14 @@ class SpeechTransformerModel(TransformerModel):
             src_lengths=len_x
         )
         return decoder_out
+
+    def get_encoder_output(self, net_input: Dict[str, Tensor]):
+        feature = net_input["src_tokens"]
+        feature_lengths = net_input["src_lengths"]
+        x, len_x = self.convSub(feature, feature_lengths)
+        encoder_output = self.encoder(x, src_lengths=len_x)
+
+        return encoder_output
 
     def spec_aug(self, features, feature_lengths):
         freq_means = torch.mean(features, dim=-1)
