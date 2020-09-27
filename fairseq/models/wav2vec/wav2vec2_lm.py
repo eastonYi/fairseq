@@ -199,7 +199,6 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         encoder_output = self.encoder(tbc=False, **kwargs)
         alphas = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
-        alphas.retain_grad(); _alphas.retain_grad(); encoder_output["encoder_out"].retain_grad()
         cif_outputs = self.cif(encoder_output, _alphas)
         logits = self.decode(cif_outputs)
 

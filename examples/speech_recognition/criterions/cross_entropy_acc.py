@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from fairseq import utils
 from fairseq.criterions import FairseqCriterion, register_criterion
-
+from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_loss
 
 @register_criterion("cross_entropy_acc")
 class CrossEntropyWithAccCriterion(FairseqCriterion):
@@ -125,3 +125,31 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
         # loss: per output token loss
         # nll_loss: per sentence loss
         return agg_output
+
+
+@register_criterion("label_smoothed_cross_entropy_acc")
+class LabelSmoothedCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
+
+    def compute_loss(self, model, net_output, target, reduction, log_probs):
+        # N, T -> N * T
+        target = target.view(-1)
+        lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
+        if not hasattr(lprobs, "batch_first"):
+            logging.warning(
+                "ERROR: we need to know whether "
+                "batch first for the net output; "
+                "you need to set batch_first attribute for the return value of "
+                "model.get_normalized_probs. Now, we assume this is true, but "
+                "in the future, we will raise exception instead. "
+            )
+        batch_first = getattr(lprobs, "batch_first", True)
+        if not batch_first:
+            lprobs = lprobs.transpose(0, 1)
+
+        # N, T, D -> N * T, D
+        lprobs = lprobs.view(-1, lprobs.size(-1))
+        loss, _ = label_smoothed_nll_loss(
+            lprobs, target.long(), 0.1, ignore_index=self.padding_idx, reduce=reduction,
+        )
+
+        return lprobs, loss

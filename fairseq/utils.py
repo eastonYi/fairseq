@@ -643,6 +643,19 @@ def eval_bool(x, default=False):
 
 
 # pytorch
+
+def sequence_mask(lengths, maxlen=None, depth=None, dtype=torch.float):
+    if maxlen is None:
+        maxlen = lengths.max()
+    mask = torch.ones((len(lengths), maxlen),
+                      device=lengths.device,
+                      dtype=torch.uint8).cumsum(dim=1) <= lengths.unsqueeze(0).t()
+    if depth:
+        mask = mask.unsqueeze(-1).repeat(1, 1, depth)
+
+    return mask.type(dtype)
+
+
 def ctc_shrink(hidden, logits, pad, blk, at_least_one=False):
     """only count the first one for the repeat freams
     """

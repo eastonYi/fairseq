@@ -49,17 +49,20 @@ def get_asr_dataset_from_json(data_json_path, tgt_dict):
             key=lambda sample: int(sample[1]["input"]["length_ms"]),
             reverse=True,
         )
-        aud_paths = [s[1]["input"]["path"] for s in sorted_samples]
-        ids = [s[0] for s in sorted_samples]
-        speakers = []
-        for s in sorted_samples:
+        tgt, aud_paths, speakers, frame_sizes, ids = [[] for _ in range(5)]
+        for i, s in enumerate(sorted_samples):
+            try:
+                res = [int(i) for i in s[1]["output"]["tokenid"].split(", ")]
+            except:
+                continue
+            tgt.append(res)
+            aud_paths.append(s[1]["input"]["path"])
+            ids.append(s)
             m = re.search("(.+?)-(.+?)-(.+?)", s[0])
             speakers.append(m.group(1) + "_" + m.group(2))
-        frame_sizes = [s[1]["input"]["length_ms"] for s in sorted_samples]
-        tgt = [
-            [int(i) for i in s[1]["output"]["tokenid"].split(", ")]
-            for s in sorted_samples
-        ]
+            frame_sizes.append(s[1]["input"]["length_ms"])
+
+        print("load {} samples, dropped {} ".format(len(tgt), len(sorted_samples) - len(tgt)))
         # append eos
         tgt = [[*t, tgt_dict.eos()] for t in tgt]
         return AsrDataset(aud_paths, frame_sizes, tgt, tgt_dict, ids, speakers)

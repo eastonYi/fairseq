@@ -5,6 +5,8 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import math
+from torch import nn, Tensor
 from fairseq import utils
 from fairseq.models import (
     FairseqEncoder,
@@ -13,6 +15,8 @@ from fairseq.models import (
     register_model,
     register_model_architecture,
 )
+from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
+from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq.modules import (
     AdaptiveSoftmax,
     FairseqDropout,
@@ -31,6 +35,7 @@ from .transformer import (
     base_architecture,
 )
 
+DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
@@ -80,7 +85,7 @@ def add_conv_args(parser):
 class SpeechTransformerModel(TransformerModel):
 
     def __init__(self, args, convSub, encoder, decoder):
-        super().__init__(encoder, decoder)
+        super().__init__(args, encoder, decoder)
         self.args = args
         self.supports_align_args = True
         self.convSub = convSub
@@ -98,13 +103,14 @@ class SpeechTransformerModel(TransformerModel):
         """Build a new model instance."""
 
         # make sure all arguments are present in older models
-        base_architecture(args)
 
         if args.encoder_layers_to_keep:
             args.encoder_layers = len(args.encoder_layers_to_keep.split(","))
         if args.decoder_layers_to_keep:
             args.decoder_layers = len(args.decoder_layers_to_keep.split(","))
 
+        if getattr(args, "max_source_positions", None) is None:
+            args.max_source_positions = DEFAULT_MAX_SOURCE_POSITIONS
         if getattr(args, "max_target_positions", None) is None:
             args.max_target_positions = DEFAULT_MAX_TARGET_POSITIONS
 
@@ -125,7 +131,7 @@ class SpeechTransformerModel(TransformerModel):
 
     @classmethod
     def build_encoder(cls, args):
-        return TransformerEncoder(args)
+        return SpeechTransformerEncoder(args)
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
@@ -144,16 +150,7 @@ class SpeechTransformerModel(TransformerModel):
 
     # TorchScript doesn't support optional arguments with variable length (**kwargs).
     # Current workaround is to add union of all arguments in child classes.
-    def forward(
-        self,
-        feature,
-        feature_lengths,
-        prev_output_tokens,
-        return_all_hiddens: bool = True,
-        features_only: bool = False,
-        alignment_layer: Optional[int] = None,
-        alignment_heads: Optional[int] = None,
-    ):
+    def forward(self, **kwargs):
         """
         feature: padded tensor (B, T, C * feat)
         feature_lengths: tensor of original lengths of input utterances (B,)
@@ -163,19 +160,17 @@ class SpeechTransformerModel(TransformerModel):
         Copied from the base class, but without ``**kwargs``,
         which are not supported by TorchScript.
         """
+        feature = kwargs["src_tokens"]
+        feature_lengths = kwargs["src_lengths"]
+        prev_output_tokens = kwargs["prev_output_tokens"]
+
         feature, feature_lengths = self.spec_aug(feature, feature_lengths)
         x, len_x = self.convSub(feature, feature_lengths)
-        encoder_out = self.encoder(
-            x, src_lengths=len_x, return_all_hiddens=return_all_hiddens
-        )
+        encoder_out = self.encoder(x, src_lengths=len_x)
         decoder_out = self.decoder(
             prev_output_tokens,
             encoder_out=encoder_out,
-            features_only=features_only,
-            alignment_layer=alignment_layer,
-            alignment_heads=alignment_heads,
-            src_lengths=len_x,
-            return_all_hiddens=return_all_hiddens,
+            src_lengths=len_x
         )
         return decoder_out
 
@@ -186,8 +181,8 @@ class SpeechTransformerModel(TransformerModel):
 
         B, T, V = features.shape
         # mask freq
-        for _ in range(self.spec_aug_conf["freq_mask_num"]):
-            fs = (self.spec_aug_conf["freq_mask_width"]*torch.rand(size=[B],
+        for _ in range(2):
+            fs = (27 * torch.rand(size=[B],
                 device=features.device, requires_grad=False)).long()
             f0s = ((V-fs).float()*torch.rand(size=[B],
                 device=features.device, requires_grad=False)).long()
@@ -195,8 +190,8 @@ class SpeechTransformerModel(TransformerModel):
                 features[b, :, f0s[b]:f0s[b]+fs[b]] = freq_means[b][:, None]
 
         # mask time
-        for _ in range(self.spec_aug_conf["time_mask_num"]):
-            ts = (self.spec_aug_conf["time_mask_width"]*torch.rand(size=[B],
+        for _ in range(2):
+            ts = (40 * torch.rand(size=[B],
                 device=features.device, requires_grad=False)).long()
             t0s = ((feature_lengths-ts).float()*torch.rand(size=[B],
                 device=features.device, requires_grad=False)).long()
@@ -208,6 +203,10 @@ class SpeechTransformerModel(TransformerModel):
 
 @register_model_architecture("speech_transformer", "speech_transformer")
 def speech_architecture(args):
+    base_architecture(args)
+    args.decoder_embed_dim = getattr(
+        args, "decoder_output_dim", args.decoder_embed_dim
+    )
     args.decoder_output_dim = getattr(
         args, "decoder_output_dim", args.decoder_embed_dim
     )
@@ -219,19 +218,17 @@ def speech_architecture(args):
 
 
 class Conv2dSubsample(torch.nn.Module):
-    def __init__(self, d_input, d_model, layer_num=2):
+    def __init__(self, args, d_input=80, d_model=512, layer_num=2):
         super().__init__()
         assert layer_num >= 1
         self.layer_num = layer_num
-        list_conv = [("subsample/conv0", torch.nn.Conv2d(1, 32, 3, (2, 1))),
-                  ("subsample/relu0", torch.nn.ReLU())]
+        list_conv = [torch.nn.Conv2d(1, 32, 3, (2, 1)),
+                     torch.nn.ReLU()]
         for i in range(layer_num-1):
-            list_conv.extend([
-                ("subsample/conv{}".format(i+1), torch.nn.Conv2d(32, 32, 3, (2, 1))),
-                ("subsample/relu{}".format(i+1), torch.nn.ReLU())
-            ])
+            list_conv.extend([torch.nn.Conv2d(32, 32, 3, (2, 1)),
+                              torch.nn.ReLU()])
         self.conv = torch.nn.Sequential(*list_conv)
-        self.affine = torch.nn.Linear(32 * (d_input-2*layer_num), d_model)
+        self.affine = torch.nn.Linear(32 * (d_input - 2 * layer_num), d_model)
 
     def forward(self, feats, feat_lengths):
         outputs = feats.unsqueeze(1)  # [B, C, T, D]
@@ -245,3 +242,249 @@ class Conv2dSubsample(torch.nn.Module):
             output_lengths = ((output_lengths-1) / 2).long()
 
         return outputs, output_lengths
+
+
+class SpeechTransformerEncoder(TransformerEncoder):
+    """
+    Transformer encoder consisting of *args.encoder_layers* layers. Each layer
+    is a :class:`TransformerEncoderLayer`.
+
+    Args:
+        args (argparse.Namespace): parsed command-line arguments
+    """
+
+    def __init__(self, args):
+        FairseqEncoder.__init__(self, None)
+        self.register_buffer("version", torch.Tensor([3]))
+
+        self.dropout_module = FairseqDropout(args.dropout, module_name=self.__class__.__name__)
+        self.encoder_layerdrop = args.encoder_layerdrop
+
+        embed_dim = args.encoder_embed_dim
+        self.max_source_positions = args.max_source_positions
+
+        self.pe = PositionalEncoding(embed_dim)
+        # self.embed_positions = (
+        #     PositionalEmbedding(
+        #         self.max_source_positions,
+        #         embed_dim,
+        #         0,
+        #         learned=args.encoder_learned_pos,
+        #     )
+        #     if not args.no_token_positional_embeddings
+        #     else None
+        # )
+
+        if getattr(args, "layernorm_embedding", False):
+            self.layernorm_embedding = LayerNorm(embed_dim)
+        else:
+            self.layernorm_embedding = None
+
+        if not args.adaptive_input and args.quant_noise_pq > 0:
+            self.quant_noise = apply_quant_noise_(
+                nn.Linear(embed_dim, embed_dim, bias=False),
+                args.quant_noise_pq,
+                args.quant_noise_pq_block_size,
+            )
+        else:
+            self.quant_noise = None
+
+        if self.encoder_layerdrop > 0.0:
+            self.layers = LayerDropModuleList(p=self.encoder_layerdrop)
+        else:
+            self.layers = nn.ModuleList([])
+        self.layers.extend(
+            [self.build_encoder_layer(args) for i in range(args.encoder_layers)]
+        )
+        self.num_layers = len(self.layers)
+
+        if args.encoder_normalize_before:
+            self.layer_norm = LayerNorm(embed_dim)
+        else:
+            self.layer_norm = None
+
+    def build_encoder_layer(self, args):
+        return TransformerEncoderLayer(args)
+
+    def forward_embedding(self, src_tokens):
+        # embed tokens and positions
+        x = src_tokens
+        # import pdb; pdb.set_trace()
+        x = self.pe(x)
+        # if self.embed_positions is not None:
+        #     x = x + self.embed_positions(src_tokens)
+        if self.layernorm_embedding is not None:
+            x = self.layernorm_embedding(x)
+        x = self.dropout_module(x)
+        if self.quant_noise is not None:
+            x = self.quant_noise(x)
+        return x
+
+    def forward(self, src_tokens, src_lengths, return_all_hiddens: bool = False):
+        """
+        Args:
+            src_tokens (LongTensor): tokens in the source language of shape
+                `(batch, src_len)`
+            src_lengths (torch.LongTensor): lengths of each source sentence of
+                shape `(batch)`
+            return_all_hiddens (bool, optional): also return all of the
+                intermediate hidden states (default: False).
+
+        Returns:
+            namedtuple:
+                - **encoder_out** (Tensor): the last encoder layer's output of
+                  shape `(src_len, batch, embed_dim)`
+                - **encoder_padding_mask** (ByteTensor): the positions of
+                  padding elements of shape `(batch, src_len)`
+                - **encoder_embedding** (Tensor): the (scaled) embedding lookup
+                  of shape `(batch, src_len, embed_dim)`
+                - **encoder_states** (List[Tensor]): all intermediate
+                  hidden states of shape `(src_len, batch, embed_dim)`.
+                  Only populated if *return_all_hiddens* is True.
+        """
+        x = self.forward_embedding(src_tokens)
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        # compute padding mask
+        encoder_padding_mask = (1-utils.sequence_mask(src_lengths)).bool()
+
+        encoder_states = [] if return_all_hiddens else None
+
+        # encoder layers
+        for layer in self.layers:
+            x = layer(x, encoder_padding_mask)
+            if return_all_hiddens:
+                assert encoder_states is not None
+                encoder_states.append(x)
+
+        if self.layer_norm is not None:
+            x = self.layer_norm(x)
+
+        return EncoderOut(
+            encoder_out=x,  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=encoder_padding_mask,  # B x T
+            encoder_states=encoder_states,  # List[T x B x C]
+            src_tokens=None,
+            src_lengths=None,
+        )
+
+    @torch.jit.export
+    def reorder_encoder_out(self, encoder_out: EncoderOut, new_order):
+        """
+        Reorder encoder output according to *new_order*.
+
+        Args:
+            encoder_out: output from the ``forward()`` method
+            new_order (LongTensor): desired order
+
+        Returns:
+            *encoder_out* rearranged according to *new_order*
+        """
+        """
+        Since encoder_padding_mask and encoder_embedding are both of type
+        Optional[Tensor] in EncoderOut, they need to be copied as local
+        variables for Torchscript Optional refinement
+        """
+        encoder_padding_mask: Optional[Tensor] = encoder_out.encoder_padding_mask
+        encoder_embedding: Optional[Tensor] = encoder_out.encoder_embedding
+
+        new_encoder_out = (
+            encoder_out.encoder_out
+            if encoder_out.encoder_out is None
+            else encoder_out.encoder_out.index_select(1, new_order)
+        )
+        new_encoder_padding_mask = (
+            encoder_padding_mask
+            if encoder_padding_mask is None
+            else encoder_padding_mask.index_select(0, new_order)
+        )
+        new_encoder_embedding = (
+            encoder_embedding
+            if encoder_embedding is None
+            else encoder_embedding.index_select(0, new_order)
+        )
+        src_tokens = encoder_out.src_tokens
+        if src_tokens is not None:
+            src_tokens = src_tokens.index_select(0, new_order)
+
+        src_lengths = encoder_out.src_lengths
+        if src_lengths is not None:
+            src_lengths = src_lengths.index_select(0, new_order)
+
+        encoder_states = encoder_out.encoder_states
+        if encoder_states is not None:
+            for idx, state in enumerate(encoder_states):
+                encoder_states[idx] = state.index_select(1, new_order)
+
+        return EncoderOut(
+            encoder_out=new_encoder_out,  # T x B x C
+            encoder_padding_mask=new_encoder_padding_mask,  # B x T
+            encoder_embedding=new_encoder_embedding,  # B x T x C
+            encoder_states=encoder_states,  # List[T x B x C]
+            src_tokens=src_tokens,  # B x T
+            src_lengths=src_lengths,  # B x 1
+        )
+
+    def max_positions(self):
+        """Maximum input length supported by the encoder."""
+        # if self.embed_positions is None:
+        #     return self.max_source_positions
+        return DEFAULT_MAX_SOURCE_POSITIONS
+        # return min(self.max_source_positions, self.embed_positions.max_positions)
+
+    def upgrade_state_dict_named(self, state_dict, name):
+        pass
+        # """Upgrade a (possibly old) state dict for new versions of fairseq."""
+        # if isinstance(self.embed_positions, SinusoidalPositionalEmbedding):
+        #     weights_key = "{}.embed_positions.weights".format(name)
+        #     if weights_key in state_dict:
+        #         print("deleting {0}".format(weights_key))
+        #         del state_dict[weights_key]
+        #     state_dict[
+        #         "{}.embed_positions._float_tensor".format(name)
+        #     ] = torch.FloatTensor(1)
+        # for i in range(self.num_layers):
+        #     # update layer norms
+        #     self.layers[i].upgrade_state_dict_named(
+        #         state_dict, "{}.layers.{}".format(name, i)
+        #     )
+
+        version_key = "{}.version".format(name)
+        if utils.item(state_dict.get(version_key, torch.Tensor([1]))[0]) < 2:
+            # earlier checkpoints did not normalize after the stack of layers
+            self.layer_norm = None
+            self.normalize = False
+            state_dict[version_key] = torch.Tensor([1])
+        return state_dict
+
+
+class PositionalEncoding(nn.Module):
+    """Implement the positional encoding (PE) function.
+
+    PE(pos, 2i)   = sin(pos/(10000^(2i/dmodel)))
+    PE(pos, 2i+1) = cos(pos/(10000^(2i/dmodel)))
+    """
+
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        # Compute the positional encodings once in log space.
+        self.scale = d_model**0.5
+        pe = torch.zeros(max_len, d_model, requires_grad=False)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() *
+                             -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, input):
+        """
+        Args:
+            input: N x T x D
+        """
+        length = input.size(1)
+
+        return input*(self.scale)+self.pe[:, :length]
