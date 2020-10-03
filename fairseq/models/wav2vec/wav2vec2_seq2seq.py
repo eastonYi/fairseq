@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq import utils
 from fairseq.models import (
     FairseqEncoder,
@@ -159,6 +160,18 @@ class TransformerModel(FairseqEncoderDecoderModel):
         res.batch_first = True
 
         return res
+
+    def get_encoder_output(self, net_input):
+        encoder_out = self.encoder(tbc=True, **net_input)
+
+        return EncoderOut(
+            encoder_out=encoder_out['encoder_out'],  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=encoder_out['encoder_padding_mask'],  # B x T
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
 
 
 @register_model("wav2vec_ctc_seq2seq")
@@ -332,7 +345,7 @@ class CIFModel(TransformerModel):
         return torch.stack(list_ls, 0)
 
     @staticmethod
-    def resize(alphas, target_lengths, at_least_one=False):
+    def resize(alphas, target_lengths, at_least_one=True):
         device = alphas.device
         # sum
         _num = alphas.sum(-1)
@@ -447,7 +460,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return extra
 
     def extract_features(
-        self, prev_output_tokens, encoder_out=None, incremental_state=None, **unused
+        self, prev_output_tokens, encoder_output=None, incremental_state=None, **unused
     ):
         """
         Similar to *forward* but only return features.
@@ -494,8 +507,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if not self.training or (dropout_probability > self.layerdrop):
                 x, attn, _ = layer(
                     x,
-                    encoder_out["encoder_out"] if encoder_out is not None else None,
-                    encoder_out["encoder_padding_mask"] if encoder_out is not None else None,
+                    encoder_output.encoder_out if encoder_output is not None else None,
+                    encoder_output.encoder_padding_mask if encoder_output is not None else None,
                     incremental_state,
                     self_attn_mask=self.buffered_future_mask(x)
                     if incremental_state is None else None,

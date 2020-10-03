@@ -50,7 +50,8 @@ output units",
         "--rnnt_len_penalty", default=-0.5, help="rnnt length penalty on word level"
     )
     parser.add_argument(
-        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm", "ctc_decoder", "seq2seq_decoder"],
+        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm",
+                                  "ctc_decoder", "seq2seq_decoder", "seq2seq_lm_decoder"],
         help="use a w2l decoder"
     )
     parser.add_argument("--lexicon", help="lexicon for w2l decoder")
@@ -325,6 +326,10 @@ def main(args, task=None, model_state=None):
             from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
 
             return Seq2seqDecoder(args, task.target_dictionary)
+        elif w2l_decoder == "seq2seq_lm_decoder":
+            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
+
+            return Seq2seqDecoder(args, task.target_dictionary, ({}, {}))
         else:
             return super().build_generator(args)
 

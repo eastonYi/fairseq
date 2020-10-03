@@ -8,3 +8,5 @@ from .wav2vec2 import *  # noqa
 from .wav2vec2_ctc import *  # noqa
 from .wav2vec2_seq2seq import *  # noqa
 from .wav2vec2_lm import * #noqa
+from .wav2vec2_lm2 import * #noqa
+from .wav2vec2_seq2seq_lm import * #noqa

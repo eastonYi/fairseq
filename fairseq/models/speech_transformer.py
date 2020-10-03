@@ -84,11 +84,10 @@ def add_conv_args(parser):
 @register_model("speech_transformer")
 class SpeechTransformerModel(TransformerModel):
 
-    def __init__(self, args, convSub, encoder, decoder):
+    def __init__(self, args, conv, encoder, decoder):
         super().__init__(args, encoder, decoder)
         self.args = args
-        self.supports_align_args = True
-        self.convSub = convSub
+        self.conv = conv
 
     @staticmethod
     def add_args(parser):
@@ -165,7 +164,7 @@ class SpeechTransformerModel(TransformerModel):
         prev_output_tokens = kwargs["prev_output_tokens"]
 
         feature, feature_lengths = self.spec_aug(feature, feature_lengths)
-        x, len_x = self.convSub(feature, feature_lengths)
+        x, len_x = self.conv(feature, feature_lengths)
         encoder_out = self.encoder(x, src_lengths=len_x)
         decoder_out = self.decoder(
             prev_output_tokens,
@@ -177,7 +176,7 @@ class SpeechTransformerModel(TransformerModel):
     def get_encoder_output(self, net_input: Dict[str, Tensor]):
         feature = net_input["src_tokens"]
         feature_lengths = net_input["src_lengths"]
-        x, len_x = self.convSub(feature, feature_lengths)
+        x, len_x = self.conv(feature, feature_lengths)
         encoder_output = self.encoder(x, src_lengths=len_x)
 
         return encoder_output
@@ -247,7 +246,7 @@ class Conv2dSubsample(torch.nn.Module):
         outputs = self.affine(outputs)
         output_lengths = feat_lengths
         for _ in range(self.layer_num):
-            output_lengths = ((output_lengths-1) / 2).long()
+            output_lengths = ((output_lengths-1) / 2.0).long()
 
         return outputs, output_lengths
 
@@ -263,72 +262,25 @@ class SpeechTransformerEncoder(TransformerEncoder):
 
     def __init__(self, args):
         FairseqEncoder.__init__(self, None)
-        self.register_buffer("version", torch.Tensor([3]))
 
-        self.dropout_module = FairseqDropout(args.dropout, module_name=self.__class__.__name__)
-        self.encoder_layerdrop = args.encoder_layerdrop
+        self.dropout = nn.Dropout(args.dropout)
 
         embed_dim = args.encoder_embed_dim
         self.max_source_positions = args.max_source_positions
 
         self.pe = PositionalEncoding(embed_dim)
-        # self.embed_positions = (
-        #     PositionalEmbedding(
-        #         self.max_source_positions,
-        #         embed_dim,
-        #         0,
-        #         learned=args.encoder_learned_pos,
-        #     )
-        #     if not args.no_token_positional_embeddings
-        #     else None
-        # )
 
-        if getattr(args, "layernorm_embedding", False):
-            self.layernorm_embedding = LayerNorm(embed_dim)
-        else:
-            self.layernorm_embedding = None
-
-        if not args.adaptive_input and args.quant_noise_pq > 0:
-            self.quant_noise = apply_quant_noise_(
-                nn.Linear(embed_dim, embed_dim, bias=False),
-                args.quant_noise_pq,
-                args.quant_noise_pq_block_size,
-            )
-        else:
-            self.quant_noise = None
-
-        if self.encoder_layerdrop > 0.0:
-            self.layers = LayerDropModuleList(p=self.encoder_layerdrop)
-        else:
-            self.layers = nn.ModuleList([])
+        self.layers = nn.ModuleList([])
         self.layers.extend(
             [self.build_encoder_layer(args) for i in range(args.encoder_layers)]
         )
         self.num_layers = len(self.layers)
-
-        if args.encoder_normalize_before:
-            self.layer_norm = LayerNorm(embed_dim)
-        else:
-            self.layer_norm = None
+        self.layer_norm = LayerNorm(embed_dim)
 
     def build_encoder_layer(self, args):
         return TransformerEncoderLayer(args)
 
-    def forward_embedding(self, src_tokens):
-        # embed tokens and positions
-        x = src_tokens
-        # import pdb; pdb.set_trace()
-        x = self.pe(x)
-        # if self.embed_positions is not None:
-        #     x = x + self.embed_positions(src_tokens)
-        if self.layernorm_embedding is not None:
-            x = self.layernorm_embedding(x)
-        x = self.dropout_module(x)
-        if self.quant_noise is not None:
-            x = self.quant_noise(x)
-        return x
-
-    def forward(self, src_tokens, src_lengths, return_all_hiddens: bool = False):
+    def forward(self, src_tokens, src_lengths):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -346,34 +298,24 @@ class SpeechTransformerEncoder(TransformerEncoder):
                   padding elements of shape `(batch, src_len)`
                 - **encoder_embedding** (Tensor): the (scaled) embedding lookup
                   of shape `(batch, src_len, embed_dim)`
-                - **encoder_states** (List[Tensor]): all intermediate
-                  hidden states of shape `(src_len, batch, embed_dim)`.
-                  Only populated if *return_all_hiddens* is True.
         """
-        x = self.forward_embedding(src_tokens)
+        x = self.dropout(self.pe(src_tokens))
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
         # compute padding mask
         encoder_padding_mask = (1-utils.sequence_mask(src_lengths)).bool()
 
-        encoder_states = [] if return_all_hiddens else None
-
         # encoder layers
         for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-            if return_all_hiddens:
-                assert encoder_states is not None
-                encoder_states.append(x)
-
-        if self.layer_norm is not None:
-            x = self.layer_norm(x)
+        x = self.layer_norm(x)
 
         return EncoderOut(
             encoder_out=x,  # T x B x C
             encoder_embedding=None,
             encoder_padding_mask=encoder_padding_mask,  # B x T
-            encoder_states=encoder_states,  # List[T x B x C]
+            encoder_states=None,
             src_tokens=None,
             src_lengths=None,
         )
@@ -441,31 +383,6 @@ class SpeechTransformerEncoder(TransformerEncoder):
         #     return self.max_source_positions
         return DEFAULT_MAX_SOURCE_POSITIONS
         # return min(self.max_source_positions, self.embed_positions.max_positions)
-
-    def upgrade_state_dict_named(self, state_dict, name):
-        pass
-        # """Upgrade a (possibly old) state dict for new versions of fairseq."""
-        # if isinstance(self.embed_positions, SinusoidalPositionalEmbedding):
-        #     weights_key = "{}.embed_positions.weights".format(name)
-        #     if weights_key in state_dict:
-        #         print("deleting {0}".format(weights_key))
-        #         del state_dict[weights_key]
-        #     state_dict[
-        #         "{}.embed_positions._float_tensor".format(name)
-        #     ] = torch.FloatTensor(1)
-        # for i in range(self.num_layers):
-        #     # update layer norms
-        #     self.layers[i].upgrade_state_dict_named(
-        #         state_dict, "{}.layers.{}".format(name, i)
-        #     )
-
-        version_key = "{}.version".format(name)
-        if utils.item(state_dict.get(version_key, torch.Tensor([1]))[0]) < 2:
-            # earlier checkpoints did not normalize after the stack of layers
-            self.layer_norm = None
-            self.normalize = False
-            state_dict[version_key] = torch.Tensor([1])
-        return state_dict
 
 
 class PositionalEncoding(nn.Module):

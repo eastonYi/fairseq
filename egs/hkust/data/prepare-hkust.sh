@@ -10,8 +10,8 @@ echo "Prepare train and test jsons"
 
 AUDIO_DIR=/data3/easton/data/HKUST/audio/dev_wav_segs
 LABELS=/data3/easton/data/HKUST/HKUST_120/test/trans.char
-Dictionary=/home/easton/projects/wav2vec/egs/hkust/data/dict.char.txt
-part=../data2/test
+Dictionary=dict.char.txt
+part=test
 
 python asr_prep_json.py \
 --audio-dirs $AUDIO_DIR \
@@ -20,7 +20,7 @@ python asr_prep_json.py \
 
 AUDIO_DIR=/data3/easton/data/HKUST/audio/train_wav_segs
 LABELS=/data3/easton/data/HKUST/HKUST_120/dev/trans.char
-part=../data2/dev
+part=dev
 
 python asr_prep_json.py \
 --audio-dirs $AUDIO_DIR \
@@ -29,7 +29,7 @@ python asr_prep_json.py \
 
 AUDIO_DIR=/data3/easton/data/HKUST/audio/train_wav_segs
 LABELS=/data3/easton/data/HKUST/HKUST_120/train/trans.char
-part=../data2/train
+part=train
 
 python asr_prep_json.py \
 --audio-dirs $AUDIO_DIR \

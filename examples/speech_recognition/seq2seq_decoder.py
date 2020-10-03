@@ -17,7 +17,7 @@ from fairseq.models.fairseq_encoder import EncoderOut
 inf = 1e9
 
 class Seq2seqDecoder(object):
-    def __init__(self, args, tgt_dict):
+    def __init__(self, args, tgt_dict, incremental_state={}):
         self.tgt_dict = tgt_dict
         self.vocab_size = len(tgt_dict)
         self.nbest = args.nbest
@@ -25,6 +25,7 @@ class Seq2seqDecoder(object):
         self.sos_idx = tgt_dict.eos()
         self.eos_idx = tgt_dict.eos()
         self.pad_idx = tgt_dict.pad()
+        self.incremental_state = incremental_state
 
     def generate(self, models, sample, **unused):
         """Generate a batch of inferences."""
@@ -63,7 +64,8 @@ class Seq2seqDecoder(object):
 
     @staticmethod
     def batch_beam_decode(encoder_output, step_forward_fn,
-                          SOS_ID, EOS_ID, vocab_size, beam_size=1, max_decode_len=100):
+                          SOS_ID, EOS_ID, vocab_size, beam_size=1,
+                          max_decode_len=100, incremental_state={}):
         """
         encoder_output:
             encoder_out=x,  # T x B x C
@@ -99,17 +101,18 @@ class Seq2seqDecoder(object):
         # the score must be [0, -inf, -inf, ...] at init, for the preds in beam is same in init!!!
         scores = torch.tensor([0.0] + [-inf] * (beam_size - 1)).float().repeat(batch_size).to(device)  # [batch_size * beam_size]
         finished = torch.zeros_like(scores).bool().to(device)
-        incremental_state = {}
 
         # collect the initial states of lstms used in decoder.
         base_indices = torch.arange(batch_size)[:, None].repeat(1, beam_size).view(-1).to(device)
 
         for _ in range(max_decode_len):
             # i, preds, scores, logits, len_decoded, finished
-            cur_logits, _ = step_forward_fn(
+            decoder_output = step_forward_fn(
                 prev_output_tokens=preds,
                 encoder_out=encoder_output,
                 incremental_state=incremental_state)
+
+            cur_logits = decoder_output["logits"]
 
             logits = torch.cat([logits, cur_logits], 1)  # [batch*beam, t, size_output]
             z = F.log_softmax(cur_logits[:, -1, :], dim=-1) # [batch*beam, size_output]

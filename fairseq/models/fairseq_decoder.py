@@ -88,3 +88,11 @@ class FairseqDecoder(nn.Module):
 
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
+
+    def set_num_updates(self, num_updates):
+        """State from trainer to pass along to model at every update."""
+
+        def _apply(m):
+            if hasattr(m, 'set_num_updates') and m != self:
+                m.set_num_updates(num_updates)
+        self.apply(_apply)

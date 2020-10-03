@@ -41,12 +41,17 @@ def add_mixer_args(parser):
         "--dim-hidden-mixer", type=int, help="dim-hidden-mixer"
     )
     parser.add_argument(
+        "--lambda-qua", type=float, help="lambda-qua"
+    )
+    parser.add_argument(
         "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
     )
     parser.add_argument(
         "--lm-path", type=str, help="dim-hidden-mixer"
     )
-
+    parser.add_argument(
+        "--teacher-forcing", action='store_true', help="is teacher-forcing"
+    )
 
 @register_model("wav2vec_ctc_lm")
 class W2V_CTC_MIX_LM(CIFModel):
@@ -153,8 +158,11 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         super().__init__(args, encoder, assigner, lm)
         self.mixer = mixer
         self.lm = lm
+        self.lm.eval()
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.num_updates = 0
+        self.teacher_forcing = args.teacher_forcing
+        self.phone_fc = nn.Linear(encoder.d, lm.dim_output, bias=True)
 
     @staticmethod
     def add_args(parser):
@@ -180,15 +188,15 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
         lm = cls.build_lm(args, task)
-        mixer = cls.build_mixer(args, encoder.d + lm.dim_output, args.dim_hidden_mixer, 2, len(tgt_dict))
+        # mixer = cls.build_mixer(args, 2*len(tgt_dict), len(tgt_dict))
+        mixer = cls.build_mixer(args, encoder.d + len(tgt_dict), len(tgt_dict))
 
         return cls(args, encoder, assigner, mixer, lm)
 
     @classmethod
-    def build_mixer(cls, args, dim_input, dim_hidden, num_layers, dim_output):
+    def build_mixer(cls, args, dim_input, dim_output):
 
         return nn.Linear(dim_input, dim_output, bias=True)
-        # return MLP(dim_input, dim_hidden, num_layers, dim_output)
 
     @classmethod
     def build_lm(cls, args, task):
@@ -200,28 +208,50 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         alphas = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
         cif_outputs = self.cif(encoder_output, _alphas)
-        logits = self.decode(cif_outputs)
+
+        if cif_outputs.size(1) == 0:
+            print('cif_outputs', cif_outputs)
+            print('_alphas', _alphas)
+
+        if self.teacher_forcing:
+            logits = self.decode(encoded_shrunk=cif_outputs,
+                                 prev_output_tokens=kwargs["prev_output_tokens"])
+        else:
+            logits = self.decode(encoded_shrunk=cif_outputs)
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'], 'num_output': num_output}
 
-    def decode(self, encoded_shrunk):
-        B, T, V = encoded_shrunk.size()
-        device = encoded_shrunk.device
-        prev_decoded = torch.ones([B, 1]).to(device).long() * EOS_IDX
-        list_logits = []
-        incremental_state = torch.jit.annotate(Dict[str, Dict[str, Optional[Tensor]]], {})
-        ft = self.freeze_lm_finetune_updates <= self.num_updates
-        for encoded_t in torch.unbind(encoded_shrunk, 1):
+    # teacher-forcing
+    def decode(self, encoded_shrunk, prev_output_tokens=None):
+        # logits_ac = self.phone_fc(encoded_shrunk)
+        # probs_ac = F.softmax(logits_ac, -1)
+        probs_ac = encoded_shrunk
+        if prev_output_tokens is not None:
+            ft = self.freeze_lm_finetune_updates <= self.num_updates
             with torch.no_grad() if not ft else contextlib.ExitStack():
-                cur_pred_raw, _ = self.lm(prev_decoded, incremental_state=incremental_state)
-            cur_pred = self.mixer(torch.cat([encoded_t, cur_pred_raw[:, 0, :]], -1))
-            list_logits.append(cur_pred)
-            cur_token = cur_pred.argmax(-1, keepdim=True)
-            prev_decoded = torch.cat([prev_decoded, cur_token], 1)
-        if not list_logits:
-            import pdb; pdb.set_trace()
-        logits = torch.stack(list_logits, 1)
-        logits.batch_first = True
+                logits_lm, _ = self.lm(prev_output_tokens.long())
+                probs_lm = F.softmax(logits_lm, -1)
+            logits = self.mixer(torch.cat([probs_ac, probs_lm], -1))
+
+            logits.batch_first = True
+        # else:
+        #     B, T, V = encoded_shrunk.size()
+        #     device = encoded_shrunk.device
+        #     prev_decoded = torch.ones([B, 1]).to(device).long() * EOS_IDX
+        #     list_logits = []
+        #     incremental_state = torch.jit.annotate(Dict[str, Dict[str, Optional[Tensor]]], {})
+        #     ft = self.freeze_lm_finetune_updates <= self.num_updates
+        #     for encoded_t in torch.unbind(encoded_shrunk, 1):
+        #         with torch.no_grad() if not ft else contextlib.ExitStack():
+        #             cur_pred_raw, _ = self.lm(prev_decoded, incremental_state=incremental_state)
+        #         cur_pred = self.mixer(torch.cat([encoded_t, cur_pred_raw[:, 0, :]], -1))
+        #         list_logits.append(cur_pred)
+        #         cur_token = cur_pred.argmax(-1, keepdim=True)
+        #         prev_decoded = torch.cat([prev_decoded, cur_token], 1)
+        #     if not list_logits:
+        #         import pdb; pdb.set_trace()
+        #     logits = torch.stack(list_logits, 1)
+        #     logits.batch_first = True
 
         return logits
 
@@ -239,23 +269,9 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
 
         return res
 
-class MLP(nn.Module):
-    def __init__(self, dim_input, dim_hidden, num_layers, dim_output):
-        super().__init__()
-        self.module_list = nn.ModuleList([nn.Linear(dim_input, dim_hidden, bias=True), nn.GELU()])
-        # self.module_list = nn.ModuleList([nn.Linear(dim_input, dim_hidden, bias=True)])
-        for _ in range(num_layers-1):
-            self.module_list.extend([nn.Linear(dim_hidden, dim_hidden, bias=True), nn.GELU()])
-            # self.module_list.extend([nn.Linear(dim_hidden, dim_hidden, bias=True)])
-        self.module_list.extend([nn.Linear(dim_hidden, dim_output, bias=False)])
-
-    def forward(self, x):
-        for layer in self.module_list:
-            x = layer(x)
-        return x
-
 
 @register_model_architecture("wav2vec_lm", "wav2vec_lm")
 def w2v_lm_architecture(args):
     cif_architecture(args)
     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
+    args.lambda_qua = getattr(args, "lambda_qua", 0.001)

@@ -117,7 +117,7 @@ class LSTMLanguageModel(FairseqLanguageModel):
             print('load LSTM_LM from {}'.format(args.lm_path))
             state = checkpoint_utils.load_checkpoint_to_cpu(args.lm_path)
             lm_args = state["args"]
-            lm_args.data = args.data
+            # lm_args.data = args.data
             assert getattr(lm_args, "lm_path", None) is None
 
             task = tasks.setup_task(lm_args)

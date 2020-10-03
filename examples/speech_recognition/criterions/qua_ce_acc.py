@@ -12,13 +12,21 @@ import torch
 import torch.nn.functional as F
 from fairseq import utils
 from fairseq.criterions import FairseqCriterion, register_criterion
+from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_loss
 
-from .cross_entropy_acc import CrossEntropyWithAccCriterion
+from .cross_entropy_acc import CrossEntropyWithAccCriterion, LabelSmoothedCrossEntropyWithAccCriterion
+
 
 @register_criterion("qua_ce_acc")
-class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
-    def __init__(self, task, sentence_avg):
-        super().__init__(task, sentence_avg)
+class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCriterion):
+    def __init__(self, args, task):
+        super().__init__(args, task)
+        self.args = args
+
+    @classmethod
+    def build_criterion(cls, args, task):
+        """Construct a criterion from command-line args."""
+        return cls(args, task)
 
     def compute_loss(self, model, net_output, sample, reduction, log_probs):
         _number = net_output["num_output"]
@@ -43,10 +51,10 @@ class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
 
         # N, T, D -> N * T, D
         lprobs = lprobs.view(-1, lprobs.size(-1))
-        ce_loss = F.nll_loss(
-            lprobs, target.long(), ignore_index=self.padding_idx, reduction=reduction
+        ce_loss, _ = label_smoothed_nll_loss(
+            lprobs, target.long(), 0.1, ignore_index=self.padding_idx, reduce=reduction,
         )
-        # ce_loss = torch.Tensor([0]).cuda().sum()
+
         return lprobs, qua_loss, ce_loss
 
     def get_logging_output(self, sample, lprobs, loss, qua_loss, ce_loss):
@@ -56,9 +64,7 @@ class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
             lprobs.argmax(1).masked_select(mask) == target.masked_select(mask)
         )
         total = torch.sum(mask)
-        sample_size = (
-            sample["target"].size(0) if self.sentence_avg else sample["ntokens"]
-        )
+        sample_size = sample["ntokens"]
 
         logging_output = {
             "loss": utils.item(loss.data),  # * sample['ntokens'],
@@ -97,13 +103,12 @@ class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
             We need to make a change to support all FairseqEncoder models.
         """
         net_output = model(**sample["net_input"])
-
         lprobs, qua_loss, ce_loss = self.compute_loss(
             model, net_output, sample, reduction, log_probs
         )
         nsentences = sample["target"].size(0)
         ntokens = sample["ntokens"]
-        loss = qua_loss / nsentences * ntokens + ce_loss
+        loss = self.args.lambda_qua * qua_loss / nsentences * ntokens + ce_loss
 
         sample_size, logging_output = self.get_logging_output(
             sample, lprobs, loss, qua_loss, ce_loss
@@ -123,7 +128,7 @@ class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
         agg_output = {
-            "loss": loss_sum / sample_size / math.log(2) if sample_size > 0 else 0.0,
+            "loss": loss_sum / sample_size if sample_size > 0 else 0.0,
             "ce_loss": ce_loss / sample_size if sample_size > 0 else 0.0,
             "qua_loss": qua_loss / nsentences if nsentences > 0 else 0.0,
             # if args.sentence_avg, then sample_size is nsentences, then loss
@@ -138,7 +143,7 @@ class QuantityCrossEntropyWithAccCriterion(CrossEntropyWithAccCriterion):
             # total is the number of validate tokens
         }
         if sample_size != ntokens:
-            agg_output["nll_loss"] = ce_loss / ntokens / math.log(2)
+            agg_output["nll_loss"] = ce_loss / ntokens
         # loss: per output token loss
         # nll_loss: per sentence loss
         return agg_output
