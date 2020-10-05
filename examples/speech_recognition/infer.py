@@ -325,7 +325,7 @@ def main(args, task=None, model_state=None):
         elif w2l_decoder == "seq2seq_decoder":
             from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
 
-            return Seq2seqDecoder(args, task.target_dictionary)
+            return Seq2seqDecoder(args, task.target_dictionary, {})
         elif w2l_decoder == "seq2seq_lm_decoder":
             from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
 

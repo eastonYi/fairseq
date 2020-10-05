@@ -163,7 +163,6 @@ class TransformerModel(FairseqEncoderDecoderModel):
 
     def get_encoder_output(self, net_input):
         encoder_out = self.encoder(tbc=True, **net_input)
-
         return EncoderOut(
             encoder_out=encoder_out['encoder_out'],  # T x B x C
             encoder_embedding=None,

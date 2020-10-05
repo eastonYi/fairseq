@@ -31,7 +31,6 @@ class Seq2seqDecoder(object):
         """Generate a batch of inferences."""
         # model.forward normally channels prev_output_tokens into the decoder
         # separately, but SequenceGenerator directly calls model.encoder
-
         encoder_out = models[0].get_encoder_output(sample['net_input'])
         self.step_forward_fn = models[0].decoder
 
@@ -44,28 +43,47 @@ class Seq2seqDecoder(object):
 
         return torch.LongTensor(list(idxs))
 
+    # def decode(self, encoder_output):
+    #     hypos = []
+    #     incremental_state = self.incremental_state.clear()
+    #     beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
+    #         encoder_output,
+    #         step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
+    #         SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
+    #         beam_size=self.beam, max_decode_len=100)
+    #
+    #     for beam_result, scores, lengthes in zip(beam_results, beam_scores, out_seq_len):
+    #         # beam_ids: beam x id; score: beam; length: beam
+    #         top = []
+    #         for result, score, length in zip(beam_result, scores, lengthes):
+    #             top.append({'tokens': self.get_tokens(result[:length]),
+    #                         "score": score})
+    #         hypos.append(top)
+    #
+    #     return hypos
+
     def decode(self, encoder_output):
         hypos = []
-        beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
-            encoder_output,
-            step_forward_fn=self.step_forward_fn,
-            SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
-            beam_size=self.beam, max_decode_len=100)
+        incremental_state = self.incremental_state.clear()
 
-        for beam_result, scores, lengthes in zip(beam_results, beam_scores, out_seq_len):
-            # beam_ids: beam x id; score: beam; length: beam
-            top = []
-            for result, score, length in zip(beam_result, scores, lengthes):
-                top.append({'tokens': self.get_tokens(result[:length]),
-                            "score": score})
-            hypos.append(top)
+        results, out_seq_len, scores = self.batch_greedy_decode(
+            encoder_output,
+            step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
+            SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
+            max_decode_len=100)
+
+        for result, score, length in zip(results, scores, out_seq_len):
+            res = {'tokens': self.get_tokens(result[:length]),
+                   "score": score}
+            hypos.append([res])
 
         return hypos
 
+
     @staticmethod
-    def batch_beam_decode(encoder_output, step_forward_fn,
+    def batch_beam_decode(encoder_output, step_forward_fn, incremental_state,
                           SOS_ID, EOS_ID, vocab_size, beam_size=1,
-                          max_decode_len=100, incremental_state={}):
+                          max_decode_len=100):
         """
         encoder_output:
             encoder_out=x,  # T x B x C
@@ -156,3 +174,57 @@ class Seq2seqDecoder(object):
         scores_sorted = scores[sorted].view(batch_size, beam_size)
 
         return preds_sorted, len_decoded_sorted, scores_sorted
+
+
+    @staticmethod
+    def batch_greedy_decode(encoder_output, step_forward_fn, incremental_state,
+                            SOS_ID, EOS_ID, vocab_size, max_decode_len=100):
+        """
+        encoder_output:
+            encoder_out=x,  # T x B x C
+            encoder_padding_mask=encoder_padding_mask,  # B x T
+            encoder_embedding=encoder_embedding,  # B x T x C
+            encoder_states=encoder_states,  # List[T x B x C]
+        """
+        len_encoded = (~encoder_output.encoder_padding_mask).sum(-1)
+        batch_size = len_encoded.size(0)
+        device = encoder_output.encoder_out.device
+        d_output = vocab_size
+
+        # [[<S>, <S>, ..., <S>]], shape: [batch_size * beam_size, 1]
+        preds = torch.ones([batch_size, 1]).long().to(device) * SOS_ID
+        logits = torch.zeros([batch_size, 0, d_output]).float().to(device)
+        len_decoded = torch.ones_like(len_encoded)
+        # the score must be [0, -inf, -inf, ...] at init, for the preds in beam is same in init!!!
+        finished = torch.zeros([batch_size]).bool().to(device)
+        scores = torch.zeros([batch_size]).to(device)
+
+        for _ in range(max_decode_len):
+            # i, preds, scores, logits, len_decoded, finished
+            decoder_output = step_forward_fn(
+                prev_output_tokens=preds,
+                encoder_out=encoder_output,
+                incremental_state=incremental_state)
+
+            cur_logits = decoder_output["logits"]
+
+            logits = torch.cat([logits, cur_logits], 1)  # [batch, t, size_output]
+            z = F.log_softmax(cur_logits[:, -1, :], dim=-1) # [batch, size_output]
+
+            # rank the combined scores
+            next_scores, next_preds = torch.topk(z, k=1, sorted=True, dim=-1)
+            scores += next_scores[0]
+
+            preds = torch.cat([preds, next_preds], axis=1)  # [batch_size, i]
+
+            has_eos = next_preds[0].eq(EOS_ID)
+            finished = torch.logical_or(finished, has_eos)
+            len_decoded += 1 - finished.int()
+
+            if finished.int().sum() == finished.size(0):
+                break
+
+        len_decoded -= 1 - finished.int() # for decoded length cut by encoded length
+        preds = preds[:, 1:]
+
+        return preds, len_decoded, scores

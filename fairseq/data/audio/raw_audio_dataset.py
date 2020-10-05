@@ -167,6 +167,9 @@ class FileAudioDataset(RawAudioDataset):
                 if min_length is not None and sz < min_length:
                     skipped += 1
                     continue
+                if max_sample_size is not None and sz > max_sample_size:
+                    skipped += 1
+                    continue
                 self.fnames.append(items[0])
                 self.sizes.append(sz)
         logger.info(f"loaded {len(self.fnames)}, skipped {skipped} samples")

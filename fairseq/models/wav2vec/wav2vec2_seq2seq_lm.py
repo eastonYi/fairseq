@@ -100,7 +100,6 @@ class TransformerModel(TransformerModel):
         return decoder_out
 
 
-
 class TransformerDecoder_DF(TransformerDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
@@ -152,7 +151,7 @@ class TransformerDecoder_DF(TransformerDecoder):
 
         ft = self.freeze_lm_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
-            self.lm.eval()
+            # self.lm.eval()
             logits_lm, _ = self.lm(prev_output_tokens,
                                    incremental_state=lm_incremental_state)
             probs_lm = F.softmax(logits_lm, -1)

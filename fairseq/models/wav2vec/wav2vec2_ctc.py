@@ -136,6 +136,13 @@ def add_common_args(parser):
         help="probability of dropping a layer in wav2vec 2.0",
     )
 
+    parser.add_argument(
+        "--w2v-update-rate",
+        default=1.0,
+        type=float,
+        help="probability of update encoder",
+    )
+
 
 @register_model("wav2vec_ctc")
 class Wav2VecCtc(BaseFairseqModel):
@@ -179,6 +186,7 @@ class Wav2VecCtc(BaseFairseqModel):
 class Wav2VecEncoder(FairseqEncoder):
     def __init__(self, args, tgt_dict=None):
         self.apply_mask = args.apply_mask
+        self.update_rate = args.w2v_update_rate
         arg_overrides = {
             "dropout": args.dropout,
             "activation_dropout": args.activation_dropout,
@@ -249,7 +257,7 @@ class Wav2VecEncoder(FairseqEncoder):
             "mask": self.apply_mask and self.training,
         }
 
-        ft = self.freeze_finetune_updates <= self.num_updates
+        ft = self.freeze_finetune_updates <= self.num_updates and torch.rand(1) < self.update_rate
 
         with torch.no_grad() if not ft else contextlib.ExitStack():
             x, padding_mask = self.w2v_model.extract_features(**w2v_args)
