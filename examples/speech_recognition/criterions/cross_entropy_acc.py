@@ -173,11 +173,26 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
 class CrossEntropyWithAccV2Criterion(FairseqCriterion):
     def __init__(self, args, task):
         super().__init__(task)
+        self.decoder = self.build_decoder(args, task)
 
     @classmethod
     def build_criterion(cls, args, task):
         """Construct a criterion from command-line args."""
         return cls(args, task)
+
+    def build_decoder(self, args, task):
+        decoder = getattr(args, "decoder", None)
+
+        if decoder == "seq2seq_decoder":
+            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
+
+            decoder = Seq2seqDecoder(args, task.target_dictionary, {})
+        elif decoder == "seq2seq_lm_decoder":
+            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
+
+            decoder = Seq2seqDecoder(args, task.target_dictionary, ({}, {}))
+
+        return decoder
 
     def compute_loss(self, model, net_output, target, reduction, log_probs):
         # N, T -> N * T
@@ -238,6 +253,30 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
             sample, target, lprobs, loss
         )
 
+        if not model.training and (logging_output["correct"] / logging_output["total"]) > 0.9:
+            import editdistance
+
+            c_err = 0
+            c_len = 0
+            self.decoder.step_forward_fn = model.decoder
+            with torch.no_grad():
+                decodeds = self.decoder.decode(encoder_output)
+                for decoded, t, inp_l in zip(decodeds, sample["target"], input_lengths):
+                    decoded = decoded[0]['tokens']
+
+                    p = (t != self.task.target_dictionary.pad()) & (
+                        t != self.task.target_dictionary.eos()
+                    )
+                    targ = t[p]
+                    targ_units_arr = targ.tolist()
+                    pred_units_arr = decoded.tolist()
+
+                    c_err += editdistance.eval(pred_units_arr, targ_units_arr)
+                    c_len += len(targ_units_arr)
+
+                logging_output["c_errors"] = c_err
+                logging_output["c_total"] = c_len
+
         return loss, sample_size, logging_output
 
     @staticmethod
@@ -264,6 +303,10 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
         }
         if sample_size != ntokens:
             agg_output["nll_loss"] = loss_sum / ntokens
+
+        c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
+        c_total = sum(log.get("c_total", 1) for log in logging_outputs)
+        agg_output["uer"] = c_errors * 100.0 / c_total
         # loss: per output token loss
         # nll_loss: per sentence loss
         return agg_output

@@ -1,5 +1,5 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_lm_2
+SAVE_DIR=exp/finetune_w2v_lm
 W2V_PATH=../libri/wav2vec2_small.pt
 DATA_DIR=data/char
 label_type=char
@@ -21,6 +21,6 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-08 --lr 8e-05 --lr-scheduler tri_stage \
 --warmup-steps 10000 --hold-steps 30000 --decay-steps 30000 --final-lr-scale 0.05 \
 --final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \
---attention-dropout 0.0 --max-tokens 500000 --max-sample-size 400000 --seed 2337 \
+--attention-dropout 0.0 --max-tokens 100000 --max-sample-size 80000 --seed 2337 \
 --ddp-backend no_c10d --update-freq 1 \
 --log-interval 50 --log-format simple --save-interval 1

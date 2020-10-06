@@ -210,9 +210,9 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         cif_outputs = self.cif(encoder_output, _alphas)
 
         if cif_outputs.size(1) == 0:
-            print('cif_outputs', cif_outputs)
-            print('_alphas', _alphas)
-
+            print('encoder_output', encoder_output.sum(-1))
+            print('alphas', alphas)
+            
         if self.num_updates <= self.teacher_forcing_updates:
             logits = self.decode(encoded_shrunk=cif_outputs,
                                  prev_output_tokens=kwargs["prev_output_tokens"])
@@ -242,8 +242,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
             for encoded_t in torch.unbind(encoded_shrunk, 1):
                 with torch.no_grad() if not ft else contextlib.ExitStack():
                     cur_logits_lm, _ = self.lm(prev_decoded, incremental_state=incremental_state)
-                    cur_probs_lm = F.softmax(cur_logits_lm, -1)
-                cur_logits = self.mixer(torch.cat([encoded_t, cur_probs_lm[:, 0, :]], -1))
+                cur_logits = self.mixer(torch.cat([encoded_t, cur_logits_lm[:, 0, :]], -1))
                 list_logits.append(cur_logits)
                 cur_token = cur_logits_lm.argmax(-1, keepdim=True)
                 prev_decoded = torch.cat([prev_decoded, cur_token], 1)

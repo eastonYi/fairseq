@@ -5,8 +5,8 @@ label_type=char
 beam=1
 DATA_DIR=data/char
 data_name=dev
-MODEL_PATH=exp/finetune_w2v_seq2seq/checkpoint_last.pt
-RESULT_DIR=exp/finetune_w2v_seq2seq/decode_seq2seq_beam${beam}_${data_name}
+MODEL_PATH=exp/finetune_w2v_seq2seq_1/checkpoint_best.pt
+RESULT_DIR=exp/finetune_w2v_seq2seq_1/decode_seq2seq_beam${beam}_${data_name}
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu \
 python $MAIN_ROOT/examples/speech_recognition/infer.py $DATA_DIR \

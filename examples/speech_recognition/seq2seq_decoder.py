@@ -20,8 +20,8 @@ class Seq2seqDecoder(object):
     def __init__(self, args, tgt_dict, incremental_state={}):
         self.tgt_dict = tgt_dict
         self.vocab_size = len(tgt_dict)
-        self.nbest = args.nbest
-        self.beam = args.beam
+        self.nbest = getattr(args, "nbest", 1)
+        self.beam = getattr(args, "beam", 1)
         self.sos_idx = tgt_dict.eos()
         self.eos_idx = tgt_dict.eos()
         self.pad_idx = tgt_dict.pad()
@@ -43,26 +43,32 @@ class Seq2seqDecoder(object):
 
         return torch.LongTensor(list(idxs))
 
-    # def decode(self, encoder_output):
-    #     hypos = []
-    #     incremental_state = self.incremental_state.clear()
-    #     beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
-    #         encoder_output,
-    #         step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
-    #         SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
-    #         beam_size=self.beam, max_decode_len=100)
-    #
-    #     for beam_result, scores, lengthes in zip(beam_results, beam_scores, out_seq_len):
-    #         # beam_ids: beam x id; score: beam; length: beam
-    #         top = []
-    #         for result, score, length in zip(beam_result, scores, lengthes):
-    #             top.append({'tokens': self.get_tokens(result[:length]),
-    #                         "score": score})
-    #         hypos.append(top)
-    #
-    #     return hypos
+    def decode(self, encoder_out):
+        if self.beam > 1:
+            return self.beam_decode(encoder_out)
+        else:
+            return self.greedy_decode(encoder_out)
 
-    def decode(self, encoder_output):
+    def beam_decode(self, encoder_output):
+        hypos = []
+        incremental_state = self.incremental_state.clear()
+        beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
+            encoder_output,
+            step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
+            SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
+            beam_size=self.beam, max_decode_len=100)
+
+        for beam_result, scores, lengthes in zip(beam_results, beam_scores, out_seq_len):
+            # beam_ids: beam x id; score: beam; length: beam
+            top = []
+            for result, score, length in zip(beam_result, scores, lengthes):
+                top.append({'tokens': self.get_tokens(result[:length]),
+                            "score": score})
+            hypos.append(top)
+
+        return hypos
+
+    def greedy_decode(self, encoder_output):
         hypos = []
         incremental_state = self.incremental_state.clear()
 
@@ -78,7 +84,6 @@ class Seq2seqDecoder(object):
             hypos.append([res])
 
         return hypos
-
 
     @staticmethod
     def batch_beam_decode(encoder_output, step_forward_fn, incremental_state,
@@ -191,11 +196,9 @@ class Seq2seqDecoder(object):
         device = encoder_output.encoder_out.device
         d_output = vocab_size
 
-        # [[<S>, <S>, ..., <S>]], shape: [batch_size * beam_size, 1]
         preds = torch.ones([batch_size, 1]).long().to(device) * SOS_ID
         logits = torch.zeros([batch_size, 0, d_output]).float().to(device)
         len_decoded = torch.ones_like(len_encoded)
-        # the score must be [0, -inf, -inf, ...] at init, for the preds in beam is same in init!!!
         finished = torch.zeros([batch_size]).bool().to(device)
         scores = torch.zeros([batch_size]).to(device)
 
@@ -213,11 +216,13 @@ class Seq2seqDecoder(object):
 
             # rank the combined scores
             next_scores, next_preds = torch.topk(z, k=1, sorted=True, dim=-1)
-            scores += next_scores[0]
+            next_scores = next_scores.squeeze(-1)
+            next_preds = next_preds.squeeze(-1)
+            scores += next_scores
 
-            preds = torch.cat([preds, next_preds], axis=1)  # [batch_size, i]
+            preds = torch.cat([preds, next_preds[:, None]], axis=1)  # [batch_size, i]
 
-            has_eos = next_preds[0].eq(EOS_ID)
+            has_eos = next_preds.eq(EOS_ID)
             finished = torch.logical_or(finished, has_eos)
             len_decoded += 1 - finished.int()
 

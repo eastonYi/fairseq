@@ -7,8 +7,8 @@ label_type=char
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR \
 --train-subset train --valid-subset dev --no-epoch-checkpoints  \
---labels $label_type --num-workers 4 --max-update 80000 \
---arch wav2vec_seq2seq --task audio_seq2seq --criterion ls_ce_acc \
+--labels $label_type --num-workers 4 --max-update 200000 \
+--arch wav2vec_seq2seq --task audio_seq2seq --criterion ls_ce_acc --decoder seq2seq_decoder \
 --best-checkpoint-metric acc --maximize-best-checkpoint-metric \
 --w2v-path $W2V_PATH \
 --decoder-embed-dim 768 --decoder-ffn-embed-dim 3072 --decoder-layers 4 --decoder-layerdrop 0.0 \

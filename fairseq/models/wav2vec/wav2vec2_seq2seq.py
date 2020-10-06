@@ -348,10 +348,12 @@ class CIFModel(TransformerModel):
         device = alphas.device
         # sum
         _num = alphas.sum(-1)
+
         # scaling
         num = target_lengths.float()
         if at_least_one:
             num = torch.where(num < 1, torch.ones_like(num), num)
+            _num = torch.where(_num < 1, torch.ones_like(_num), _num)
         num_noise = num + 0.9 * torch.rand(alphas.size(0)).to(device) - 0.45
         alphas *= (num_noise / _num)[:, None].repeat(1, alphas.size(1))
 
@@ -693,7 +695,7 @@ class Conv2DFeatureExtractionModel(nn.Module):
     def forward(self, x):
         if self.output == 'same':
             length = x.size(1)
-            x = F.pad(x, [0,0,0,20,0,0])
+            x = F.pad(x, [0,0,0,50,0,0])
         x = x.transpose(1,2)
 
         for conv in self.conv_layers:

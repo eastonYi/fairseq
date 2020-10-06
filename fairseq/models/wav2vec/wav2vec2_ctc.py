@@ -143,6 +143,13 @@ def add_common_args(parser):
         help="probability of update encoder",
     )
 
+    parser.add_argument(
+        "--decoder",
+        default='ctc_decoder',
+        type=str,
+        help="performance decoder",
+    )
+
 
 @register_model("wav2vec_ctc")
 class Wav2VecCtc(BaseFairseqModel):
