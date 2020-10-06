@@ -278,15 +278,15 @@ class CIFModel(TransformerModel):
         return FCDecoder(args, tgt_dict, input_dim)
 
     def forward(self, **kwargs):
-        encoder_out = self.encoder(tbc=False, **kwargs)
-        alphas = self.assigner(encoder_out)
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        alphas = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         # if self.training:
         #     _alphas = self.resize(alphas, kwargs['target_lengths'])
         # else:
         #     print('eval mode forward')
         #     _alphas = alphas
-        cif_outputs = self.cif(encoder_out, _alphas)
+        cif_outputs = self.cif(encoder_output, _alphas)
         logits = self.decoder(cif_outputs)
         return {'logits': logits, 'num_output': num_output}
 
@@ -585,8 +585,8 @@ class Assigner(FairseqEncoder):
     def forward(self, encoder_output):
         """
         Args:
-            encoded (FloatTensor): previous decoder outputs of shape
-                `(batch, tgt_len)`, for teacher forcing
+            encoder_out (FloatTensor): previous decoder outputs of shape
+                `(B, T, H)`, for teacher forcing
             encoded_lengths (Tensor): output from the encoder, used for
                 encoder-side attention
         Returns:

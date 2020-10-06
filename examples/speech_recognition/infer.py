@@ -51,7 +51,8 @@ output units",
     )
     parser.add_argument(
         "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm",
-                                  "ctc_decoder", "seq2seq_decoder", "seq2seq_lm_decoder"],
+                                  "ctc_decoder", "seq2seq_decoder", "seq2seq_lm_decoder",
+                                  "cif_decoder", "cif_lm_decoder"],
         help="use a w2l decoder"
     )
     parser.add_argument("--lexicon", help="lexicon for w2l decoder")
@@ -322,6 +323,14 @@ def main(args, task=None, model_state=None):
             from examples.speech_recognition.ctc_decoder import CTCDecoder
 
             return CTCDecoder(args, task.target_dictionary)
+        elif w2l_decoder == "cif_decoder":
+            from examples.speech_recognition.cif_decoder import CIFDecoder
+
+            return CIFDecoder(args, task.target_dictionary, {})
+        elif w2l_decoder == "cif_lm_decoder":
+            from examples.speech_recognition.cif_decoder import CIFDecoder
+
+            return CIFDecoder(args, task.target_dictionary, ({}, {}))
         elif w2l_decoder == "seq2seq_decoder":
             from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
 

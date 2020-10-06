@@ -210,9 +210,10 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         cif_outputs = self.cif(encoder_output, _alphas)
 
         if cif_outputs.size(1) == 0:
-            print('encoder_output', encoder_output.sum(-1))
+            print('encoder_output', encoder_output['encoder_out'].sum(-1))
             print('alphas', alphas)
-            
+            import pdb; pdb.set_trace()
+
         if self.num_updates <= self.teacher_forcing_updates:
             logits = self.decode(encoded_shrunk=cif_outputs,
                                  prev_output_tokens=kwargs["prev_output_tokens"])
@@ -222,17 +223,29 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         return {'logits': logits, 'len_logits': kwargs['target_lengths'], 'num_output': num_output}
 
     # teacher-forcing
-    def decode(self, encoded_shrunk, prev_output_tokens=None):
+    def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
         # logits_ac = self.phone_fc(encoded_shrunk)
         # probs_ac = F.softmax(logits_ac, -1)
-        if prev_output_tokens is not None:
+        if incremental_states is not None: # step forward
+            assert prev_output_tokens is not None, t is not None
+            # t, incremental_state = incremental_states # t, ({...}, {...})
+            B, T, V = encoded_shrunk.size()
+            device = encoded_shrunk.device
+            with torch.no_grad():
+                encoded_t = encoded_shrunk[:, t, :]
+                cur_logits_lm, _ = self.lm(prev_output_tokens, incremental_state=incremental_states[1])
+                cur_logits = self.mixer(torch.cat([encoded_t, cur_logits_lm[:, 0, :]], -1))
+                logits = cur_logits
+
+        elif prev_output_tokens is not None: # teacher-forcing
             ft = self.freeze_lm_finetune_updates <= self.num_updates
             with torch.no_grad() if not ft else contextlib.ExitStack():
                 logits_lm, _ = self.lm(prev_output_tokens.long())
             logits = self.mixer(torch.cat([encoded_shrunk, logits_lm], -1))
             # probs_lm = F.softmax(logits_lm, -1)
             # logits = self.mixer(torch.cat([probs_ac, probs_lm], -1))
-        else:
+
+        else: # self-decode
             B, T, V = encoded_shrunk.size()
             device = encoded_shrunk.device
             prev_decoded = torch.ones([B, 1]).to(device).long() * EOS_IDX

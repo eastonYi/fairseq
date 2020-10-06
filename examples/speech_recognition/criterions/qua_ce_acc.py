@@ -55,6 +55,10 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
             lprobs, target.long(), 0.1, ignore_index=self.padding_idx, reduce=reduction,
         )
 
+        if torch.isnan(qua_loss.sum() + ce_loss.sum() + lprobs.sum()):
+            import pdb; pdb.set_trace()
+            print('here')
+
         return lprobs, qua_loss, ce_loss
 
     def get_logging_output(self, sample, lprobs, loss, qua_loss, ce_loss):
@@ -106,9 +110,14 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
         lprobs, qua_loss, ce_loss = self.compute_loss(
             model, net_output, sample, reduction, log_probs
         )
-        nsentences = sample["target"].size(0)
+
+        nsentences = sample["target"].size(0) + 1.0
         ntokens = sample["ntokens"]
-        loss = self.args.lambda_qua * qua_loss / nsentences * ntokens + ce_loss
+        loss = self.args.lambda_qua * qua_loss * ntokens / nsentences + ce_loss
+
+        if torch.isnan(loss.sum()):
+            import pdb; pdb.set_trace()
+            print('here')
 
         sample_size, logging_output = self.get_logging_output(
             sample, lprobs, loss, qua_loss, ce_loss
