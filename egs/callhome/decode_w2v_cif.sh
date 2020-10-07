@@ -3,10 +3,10 @@
 gpu=$1
 label_type=char
 beam=1
-DATA_DIR=data/char
-data_name=dev
-MODEL_PATH=exp/finetune_w2v_lm/checkpoint_best.pt
-RESULT_DIR=exp/finetune_w2v_lm/decode_w2v_cif_beam${beam}_${data_name}
+DATA_DIR=data/ma/hkust_style_char
+data_name=test
+MODEL_PATH=exp/finetune_w2v_lm_teacher_forcing_2.1/checkpoint_best.pt
+RESULT_DIR=exp/finetune_w2v_lm_teacher_forcing_2.1/decode_w2v_cif_beam${beam}_${data_name}
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu \
 python $MAIN_ROOT/examples/speech_recognition/infer.py $DATA_DIR \

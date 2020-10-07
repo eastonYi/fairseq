@@ -1,5 +1,5 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_seq2seq_lm_ma
+SAVE_DIR=exp/finetune_w2v_seq2seq_lm_en
 W2V_PATH=../libri/wav2vec2_small.pt
 LM_PATH=../language_model/hkust/exp/lstm_hkust_char_add_callhome_ma/checkpoint_best.pt
 DATA_DIR=data/ma/hkust_style_char

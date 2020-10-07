@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from fairseq import utils
 from fairseq.models.fairseq_encoder import EncoderOut
-from seq2seq_decoder import Seq2seqDecoder
+from .seq2seq_decoder import Seq2seqDecoder
 inf = 1e9
 
 

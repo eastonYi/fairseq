@@ -253,7 +253,7 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
             sample, target, lprobs, loss
         )
 
-        if not model.training and (logging_output["correct"] / logging_output["total"]) > 0.9:
+        if not model.training:
             import editdistance
 
             c_err = 0
@@ -306,7 +306,8 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
 
         c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
         c_total = sum(log.get("c_total", 1) for log in logging_outputs)
-        agg_output["uer"] = c_errors * 100.0 / c_total
+        if c_total > 1:
+            agg_output["uer"] = c_errors * 100.0 / c_total
         # loss: per output token loss
         # nll_loss: per sentence loss
         return agg_output

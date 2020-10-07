@@ -154,9 +154,7 @@ class TransformerDecoder_DF(TransformerDecoder):
             # self.lm.eval()
             logits_lm, _ = self.lm(prev_output_tokens,
                                    incremental_state=lm_incremental_state)
-            probs_lm = F.softmax(logits_lm, -1)
-        x = torch.cat([x, probs_lm], -1)
-
+        x = torch.cat([x, logits_lm], -1)
         x = self.output_layer(x)
         extra["logits"] = x
 

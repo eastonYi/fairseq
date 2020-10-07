@@ -351,13 +351,13 @@ class CIFModel(TransformerModel):
 
         # scaling
         num = target_lengths.float()
-        if at_least_one:
-            num = torch.where(num < 1, torch.ones_like(num), num)
-            _num = torch.where(_num < 1, torch.ones_like(_num), _num)
+        # if at_least_one:
+        #     num = torch.where(num < 1, torch.ones_like(num), num)
+        #     _num = torch.where(_num < 1, torch.ones_like(_num), _num)
         num_noise = num + 0.9 * torch.rand(alphas.size(0)).to(device) - 0.45
-        alphas *= (num_noise / _num)[:, None].repeat(1, alphas.size(1))
+        _alphas = alphas * (num_noise / _num)[:, None].repeat(1, alphas.size(1))
 
-        return alphas, _num
+        return _alphas, _num
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):

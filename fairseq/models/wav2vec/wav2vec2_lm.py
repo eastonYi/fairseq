@@ -162,7 +162,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.num_updates = 0
         self.teacher_forcing_updates = args.teacher_forcing_updates
-        self.phone_fc = nn.Linear(encoder.d, lm.dim_output, bias=True)
+        # self.phone_fc = nn.Linear(encoder.d, lm.dim_output, bias=True)
 
     @staticmethod
     def add_args(parser):
@@ -188,7 +188,6 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
         lm = cls.build_lm(args, task)
-        # mixer = cls.build_mixer(args, 2*len(tgt_dict), len(tgt_dict))
         mixer = cls.build_mixer(args, encoder.d + len(tgt_dict), len(tgt_dict))
 
         return cls(args, encoder, assigner, mixer, lm)
@@ -209,6 +208,10 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
         cif_outputs = self.cif(encoder_output, _alphas)
 
+        if torch.round(_alphas.sum(-1)).eq(0).sum() > 1:
+            import pdb; pdb.set_trace()
+        if cif_outputs.size(1) != kwargs["prev_output_tokens"].size(1):
+            import pdb; pdb.set_trace()
         if cif_outputs.size(1) == 0:
             print('encoder_output', encoder_output['encoder_out'].sum(-1))
             print('alphas', alphas)
@@ -241,6 +244,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
             ft = self.freeze_lm_finetune_updates <= self.num_updates
             with torch.no_grad() if not ft else contextlib.ExitStack():
                 logits_lm, _ = self.lm(prev_output_tokens.long())
+
             logits = self.mixer(torch.cat([encoded_shrunk, logits_lm], -1))
             # probs_lm = F.softmax(logits_lm, -1)
             # logits = self.mixer(torch.cat([probs_ac, probs_lm], -1))

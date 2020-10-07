@@ -8,6 +8,7 @@
 """
 seq2seq decoders.
 """
+from copy import deepcopy
 import itertools as it
 import torch
 import torch.nn.functional as F
@@ -51,10 +52,10 @@ class Seq2seqDecoder(object):
 
     def beam_decode(self, encoder_output):
         hypos = []
-        incremental_state = self.incremental_state.clear()
         beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
             encoder_output,
-            step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
+            step_forward_fn=self.step_forward_fn,
+            incremental_state=deepcopy(self.incremental_state),
             SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
             beam_size=self.beam, max_decode_len=100)
 
@@ -70,11 +71,11 @@ class Seq2seqDecoder(object):
 
     def greedy_decode(self, encoder_output):
         hypos = []
-        incremental_state = self.incremental_state.clear()
 
         results, out_seq_len, scores = self.batch_greedy_decode(
             encoder_output,
-            step_forward_fn=self.step_forward_fn, incremental_state=incremental_state,
+            step_forward_fn=self.step_forward_fn,
+            incremental_state=deepcopy(self.incremental_state),
             SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
             max_decode_len=100)
 
@@ -179,7 +180,6 @@ class Seq2seqDecoder(object):
         scores_sorted = scores[sorted].view(batch_size, beam_size)
 
         return preds_sorted, len_decoded_sorted, scores_sorted
-
 
     @staticmethod
     def batch_greedy_decode(encoder_output, step_forward_fn, incremental_state,

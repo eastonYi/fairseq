@@ -17,7 +17,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 --mask-channel-prob 0.5 \
 --feature-grad-mult 0.0 \
 --freeze-finetune-updates 1000 --freeze-lm-finetune-updates 800000 --teacher-forcing-updates 10000 \
---validate-after-updates 1  --validate-interval 1 \
+--validate-after-updates 1  --validate-interval 1 --decoder cif_lm_decoder \
 --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-08 --lr 8e-05 --lr-scheduler tri_stage \
 --warmup-steps 10000 --hold-steps 30000 --decay-steps 30000 --final-lr-scale 0.05 \
 --final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \

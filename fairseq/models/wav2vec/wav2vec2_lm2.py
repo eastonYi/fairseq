@@ -28,30 +28,47 @@ from fairseq.modules import (
 )
 
 from .wav2vec2_seq2seq import CIFModel, cif_architecture
-from .wav2vec2_lm import W2V_MIX_LM
+from .wav2vec2_lm import W2V_MIX_LM, W2V_CTC_MIX_LM
 
 PAD_IDX = 1
 EOS_IDX = 2
-BLK_IDX = -1
+
+def NonlinearLayer(in_features, out_features, bias=True, activation_fn=nn.ReLU):
+    """Weight-normalized non-linear layer (input: N x T x C)"""
+    m = nn.Linear(in_features, out_features, bias=bias)
+    m.weight.data.uniform_(-0.1, 0.1)
+    if bias:
+        m.bias.data.uniform_(-0.1, 0.1)
+    return nn.Sequential(m, activation_fn())
 
 
-def add_mixer_args(parser):
-    parser.add_argument(
-        "--dim-hidden-mixer", type=int, help="dim-hidden-mixer"
-    )
-    parser.add_argument(
-        "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
-    )
-    parser.add_argument(
-        "--lm-path", type=str, help="dim-hidden-mixer"
-    )
-    parser.add_argument(
-        "--teacher-forcing", action='store_true', help="is teacher-forcing"
-    )
-
-
-@register_model("wav2vec_lm2")
+@register_model("wav2vec_lm_ColdFusion")
 class W2V_MIX_LM2(W2V_MIX_LM):
+
+    def __init__(self, args, encoder, assigner, lm):
+        W2V_CTC_MIX_LM.__init__(self, args, encoder, assigner, lm)
+        self.lm = lm
+        self.lm.eval()
+        self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
+        self.num_updates = 0
+        self.teacher_forcing_updates = args.teacher_forcing_updates
+
+        dim_phone, dim_hidden, vocab_size = encoder.d, 1024, lm.dim_output
+        self.hidden_layer = NonlinearLayer(
+            vocab_size, dim_hidden, bias=False, activation_fn=nn.ReLU
+        )
+        self.gating_network = NonlinearLayer(
+            dim_hidden + dim_phone,
+            dim_hidden,
+            bias=True,
+            activation_fn=nn.Sigmoid,
+        )
+        self.output_projections = NonlinearLayer(
+            dim_hidden + dim_phone,
+            vocab_size,
+            bias=False,
+            activation_fn=nn.ReLU,
+        )
 
     @classmethod
     def build_model(cls, args, task):
@@ -72,78 +89,42 @@ class W2V_MIX_LM2(W2V_MIX_LM):
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
         lm = cls.build_lm(args, task)
-        mixer = cls.build_mixer(args, encoder.d, args.dim_hidden_mixer, 2, len(tgt_dict))
 
-        return cls(args, encoder, assigner, mixer, lm)
+        return cls(args, encoder, assigner, lm)
 
-    @classmethod
-    def build_mixer(cls, args, dim_phone, dim_hidden, num_layers, dim_output):
+    def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
+        if incremental_states is not None: # step forward
+            assert prev_output_tokens is not None, t is not None
+            # t, incremental_state = incremental_states # t, ({...}, {...})
+            B, T, V = encoded_shrunk.size()
+            with torch.no_grad():
+                encoded_t = encoded_shrunk[:, t:t+1, :]
+                cur_logits_lm, _ = self.lm(prev_output_tokens, incremental_state=incremental_states[1])
+                pred_lm = F.softmax(cur_logits_lm, -1)
+                h_lm = self.hidden_layer(pred_lm)
+                h_am_lm = torch.cat([encoded_t, h_lm], -1)
+                g = self.gating_network(h_am_lm)
+                h_cf = torch.cat([encoded_t, g * h_lm], -1)
+                logits = self.output_projections(h_cf)[:, 0, :]
 
-        # return nn.Linear(dim_input, dim_output, bias=True)
-        return MLP(dim_phone, dim_hidden, num_layers, dim_output)
-
-    def forward(self, **kwargs):
-        encoder_output = self.encoder(tbc=False, **kwargs)
-        alphas = self.assigner(encoder_output)
-        _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
-        cif_outputs = self.cif(encoder_output, _alphas)
-        logits = self.decode(encoded_shrunk=cif_outputs,
-                             prev_output_tokens=kwargs["prev_output_tokens"])
-        try:
-            if self.teacher_forcing:
-                logits = self.decode(encoded_shrunk=cif_outputs,
-                                     prev_output_tokens=kwargs["prev_output_tokens"])
-            else:
-                logits = self.decode(encoded_shrunk=cif_outputs)
-        except:
-            print('cif_outputs: ', cif_outputs.size())
-            print('prev_output_tokens: ', kwargs["prev_output_tokens"], kwargs["prev_output_tokens"].size())
-            print('_alphas: ', _alphas.sum(-1))
-            print('target_lengths: ', kwargs['target_lengths'])
-            import pdb; pdb.set_trace()
-
-        return {'logits': logits, 'len_logits': kwargs['target_lengths'], 'num_output': num_output}
-
-    # teacher-forcing
-    def decode(self, encoded_shrunk, prev_output_tokens=None):
-        ft = self.freeze_lm_finetune_updates <= self.num_updates
-        with torch.no_grad() if not ft else contextlib.ExitStack():
-            logits_raw, _ = self.lm(prev_output_tokens.long())
-            pred_raw = F.softmax(logits_raw, -1)
-        try:
-            logits = self.mixer(encoded_shrunk, pred_raw)
-        except:
-            print('encoded_shrunk: ', encoded_shrunk.size())
-            print('logits_raw: ', logits_raw.size())
-            print('prev_output_tokens: ', prev_output_tokens.size())
+        elif prev_output_tokens is not None: # teacher-forcing
+            ft = self.freeze_lm_finetune_updates <= self.num_updates
+            with torch.no_grad() if not ft else contextlib.ExitStack():
+                logits_lm, _ = self.lm(prev_output_tokens.long())
+                pred_lm = F.softmax(logits_lm, -1)
+            h_lm = self.hidden_layer(pred_lm)
+            h_am_lm = torch.cat([encoded_shrunk, h_lm], -1)
+            g = self.gating_network(h_am_lm)
+            h_cf = torch.cat([encoded_shrunk, g * h_lm], -1)
+            logits = self.output_projections(h_cf)
 
         logits.batch_first = True
 
         return logits
 
-class MLP(nn.Module):
-    def __init__(self, dim_phone, dim_hidden, num_layers, dim_output):
-        super().__init__()
-        dim_token = dim_output
-        self.module_list = nn.ModuleList([nn.Linear(dim_token + dim_phone, dim_hidden, bias=True), nn.ReLU()])
-        # self.module_list = nn.ModuleList([nn.Linear(dim_input, dim_hidden, bias=True)])
-        for _ in range(num_layers-1):
-            self.module_list.extend([nn.Linear(dim_hidden, dim_hidden, bias=True), nn.ReLU()])
-            # self.module_list.extend([nn.Linear(dim_hidden, dim_hidden, bias=True)])
-        self.module_list.extend([nn.Linear(dim_hidden, dim_output, bias=False)])
-        self.phoen_fc = nn.Linear(dim_phone, dim_output, bias=False)
 
-    def forward(self, vec_phone, vec_token):
-        x = torch.cat([vec_phone, vec_token], -1)
-        for layer in self.module_list:
-            x = layer(x)
-
-        x += self.phoen_fc(vec_phone)
-
-        return x
-
-
-@register_model_architecture("wav2vec_lm2", "wav2vec_lm2")
+@register_model_architecture("wav2vec_lm_ColdFusion", "wav2vec_lm_ColdFusion")
 def w2v_lm_architecture2(args):
     cif_architecture(args)
     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
+    args.lambda_qua = getattr(args, "lambda_qua", 0.1)
