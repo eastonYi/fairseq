@@ -31,6 +31,10 @@ from fairseq.modules import (
 
 from .wav2vec2_ctc import add_common_args, Wav2VecEncoder, Linear, base_architecture
 
+PAD_IDX = 1
+EOS_IDX = 2
+eps = 1e-7
+
 
 def add_decoder_args(parser):
     parser.add_argument(
@@ -95,12 +99,17 @@ def add_decoder_args(parser):
         metavar="D",
         help="dropout probability after activation in FFN inside the decoder",
     )
+    parser.add_argument(
+        "--teacher-forcing-updates", type=int, help="is teacher-forcing"
+    )
 
 
 @register_model("wav2vec_seq2seq")
 class TransformerModel(FairseqEncoderDecoderModel):
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
+        self.num_updates = 0
+        self.teacher_forcing_updates = args.teacher_forcing_updates
 
     @staticmethod
     def add_args(parser):
@@ -120,12 +129,6 @@ class TransformerModel(FairseqEncoderDecoderModel):
             args.max_target_positions = 2048
 
         tgt_dict = task.target_dictionary
-
-        def build_embedding(dictionary, embed_dim):
-            num_embeddings = len(dictionary)
-            padding_idx = dictionary.pad()
-            emb = Embedding(num_embeddings, embed_dim, padding_idx)
-            return emb
 
         decoder_embed_tokens = build_embedding(tgt_dict, args.decoder_embed_dim)
 
@@ -246,6 +249,8 @@ class CIFModel(TransformerModel):
             metavar="EXPR",
             help="convolutional feature extraction layers [(dim, kernel_size, stride), ...]",
         )
+        parser.add_argument("--lambda-qua", type=float, metavar="D", help="lambda-qua")
+        parser.add_argument("--lambda-cp", type=float, metavar="D", help="lambda-cp")
 
     @classmethod
     def build_model(cls, args, task):
@@ -255,63 +260,72 @@ class CIFModel(TransformerModel):
 
         if not hasattr(args, "max_source_positions"):
             args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
 
         tgt_dict = task.target_dictionary
 
-        # def build_embedding(dictionary, embed_dim):
-        #     num_embeddings = len(dictionary)
-        #     padding_idx = dictionary.pad()
-        #     emb = Embedding(num_embeddings, embed_dim, padding_idx)
-        #     return emb
+        decoder_embed_tokens = build_embedding(tgt_dict, args.decoder_embed_dim)
 
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
-        decoder = cls.build_decoder(args, tgt_dict, encoder.d)
+        # decoder = cls.build_decoder(args, tgt_dict, encoder.d)
+        decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
+
         return cls(args, encoder, assigner, decoder)
 
     @classmethod
     def build_assigner(cls, args, dim_input):
         return Assigner(args, dim_input)
 
+    # @classmethod
+    # def build_decoder(cls, args, tgt_dict, input_dim):
+        # return FCDecoder(args, tgt_dict, input_dim)
+
     @classmethod
-    def build_decoder(cls, args, tgt_dict, input_dim):
-        return FCDecoder(args, tgt_dict, input_dim)
+    def build_decoder(cls, args, tgt_dict, embed_tokens):
+        return TransformerDecoder(args, tgt_dict, embed_tokens)
 
     def forward(self, **kwargs):
         encoder_output = self.encoder(tbc=False, **kwargs)
         alphas = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
-        # if self.training:
-        #     _alphas = self.resize(alphas, kwargs['target_lengths'])
-        # else:
-        #     print('eval mode forward')
-        #     _alphas = alphas
         cif_outputs = self.cif(encoder_output, _alphas)
-        logits = self.decoder(cif_outputs)
-        return {'logits': logits, 'num_output': num_output}
 
-    def cif(self, encoder_output, alphas, threshold=0.95, log=False):
+        if cif_outputs.abs().sum(-1).ne(0).sum() != kwargs['target_lengths'].sum():
+            import pdb; pdb.set_trace()
+
+        if self.num_updates <= self.teacher_forcing_updates:
+            logits = self.decode(encoded_shrunk=cif_outputs,
+                                 prev_output_tokens=kwargs["prev_output_tokens"])
+        else:
+            logits = self.decode(encoded_shrunk=cif_outputs)
+
+        return {'logits': logits, 'len_logits': kwargs['target_lengths'],
+                'alphas': alphas, 'num_output': num_output}
+
+    def cif(self, encoder_output, alphas, threshold=0.9, log=False):
         hidden = encoder_output['encoder_out']
         device = hidden.device
-        batch_size, len_time, hidden_size = hidden.size()
+        B, T, H = hidden.size()
 
         # loop varss
-        integrate = torch.zeros([batch_size]).to(device)
-        frame = torch.zeros([batch_size, hidden_size]).to(device)
+        integrate = torch.zeros([B]).to(device)
+        frame = torch.zeros([B, H]).to(device)
         # intermediate vars along time
         list_fires = []
         list_frames = []
 
-        for t in range(len_time):
+        for t in range(T):
             alpha = alphas[:, t]
-            distribution_completion = torch.ones([batch_size]).to(device) - integrate
+            distribution_completion = torch.ones([B]).to(device) - integrate
 
             integrate += alpha
             list_fires.append(integrate)
 
             fire_place = integrate > threshold
             integrate = torch.where(fire_place,
-                                    integrate - torch.ones([batch_size]).to(device),
+                                    integrate - torch.ones([B]).to(device),
                                     integrate)
             cur = torch.where(fire_place,
                               distribution_completion,
@@ -320,44 +334,97 @@ class CIFModel(TransformerModel):
 
             frame += cur[:, None] * hidden[:, t, :]
             list_frames.append(frame)
-            frame = torch.where(fire_place[:, None].repeat(1, hidden_size),
+            frame = torch.where(fire_place[:, None].repeat(1, H),
                                 remainds[:, None] * hidden[:, t, :],
                                 frame)
             if log:
-                print('t: {}\t{:.3f} -> {:.3f}|{:.3f}'.format(
-                    t, integrate[0].numpy(), cur[0].numpy(), remainds[0].numpy()))
+                print('t: {}\t{:.3f} -> {:.3f}|{:.3f} fire: {}'.format(
+                    t, integrate[log], cur[log], remainds[log], fire_place[log]))
 
         fires = torch.stack(list_fires, 1)
         frames = torch.stack(list_frames, 1)
         list_ls = []
         len_labels = torch.round(alphas.sum(-1)).int()
         max_label_len = len_labels.max()
-        for b in range(batch_size):
+        for b in range(B):
             fire = fires[b, :]
             l = torch.index_select(frames[b, :, :], 0, torch.where(fire > threshold)[0])
-            pad_l = torch.zeros([max_label_len - l.size(0), hidden_size]).to(device)
+            pad_l = torch.zeros([max_label_len - l.size(0), H]).to(device)
             list_ls.append(torch.cat([l, pad_l], 0))
 
         if log:
-            print('fire:\n', fires.numpy())
+            print('fire:\n', fires)
+            print('fire place:\n', torch.where(fires > threshold))
 
         return torch.stack(list_ls, 0)
 
     @staticmethod
-    def resize(alphas, target_lengths, at_least_one=True):
+    def resize(alphas, target_lengths, noise=0.1, threshold=0.9):
+        """
+        alpha in thresh=0.9 | (0.91, noise-0.09)
+        """
         device = alphas.device
         # sum
         _num = alphas.sum(-1)
 
         # scaling
         num = target_lengths.float()
-        # if at_least_one:
-        #     num = torch.where(num < 1, torch.ones_like(num), num)
-        #     _num = torch.where(_num < 1, torch.ones_like(_num), _num)
-        num_noise = num + 0.9 * torch.rand(alphas.size(0)).to(device) - 0.45
+        num_noise = num + 2 * noise * torch.rand(alphas.size(0)).to(device) - noise
+        if (torch.round(num) < 1).float().sum() > 0 or \
+           (torch.round(num_noise) < 1).float().sum() > 0:
+            import pdb; pdb.set_trace()
         _alphas = alphas * (num_noise / _num)[:, None].repeat(1, alphas.size(1))
 
+        # rm attention value that exceeds threashold
+        while len(torch.where(_alphas >= threshold)[0]):
+            xs, ys = torch.where(_alphas >= threshold)
+            for x, y in zip(xs, ys):
+                if _alphas[x][y] >= threshold:
+                    mask = _alphas[x].ne(0).float()
+                    mean = 0.5 * _alphas[x].sum() / mask.sum()
+                    _alphas[x] = _alphas[x] * 0.5 + mean * mask
+
         return _alphas, _num
+
+    def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
+        encoder_padding_mask = encoded_shrunk.abs().sum(-1).eq(0)
+        encoder_output = EncoderOut(
+            encoder_out=encoded_shrunk.transpose(0, 1),  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=encoder_padding_mask,  # B x T
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+
+        if incremental_states is not None: # step forward
+            assert prev_output_tokens is not None, t is not None
+            cur_logits = self.decoder(prev_output_tokens=prev_output_tokens,
+                                      encoder_out=encoder_output,
+                                      incremental_state=incremental_states)
+            logits = cur_logits["logits"]
+        elif prev_output_tokens is not None: # teacher-forcing
+            logits = self.decoder(prev_output_tokens=prev_output_tokens,
+                                  encoder_out=encoder_output)
+            logits = logits["logits"]
+
+        else: # self-decode
+            B, T, V = encoded_shrunk.size()
+            device = encoded_shrunk.device
+            prev_decoded = torch.ones([B, 1]).to(device).long() * EOS_IDX
+            list_logits = []
+            incremental_state = {}
+            for _ in torch.range(T):
+                cur_logits = self.decoder(prev_output_tokens=prev_decoded,
+                                          encoder_out=encoder_output,
+                                          incremental_state=incremental_state)
+                list_logits.append(cur_logits)
+                cur_token = cur_logits.argmax(-1, keepdim=True)
+                prev_decoded = torch.cat([prev_decoded, cur_token], 1)
+
+            logits = torch.stack(list_logits, 1)
+
+        return logits
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
@@ -471,7 +538,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 - the decoder's features of shape `(batch, tgt_len, embed_dim)`
                 - a dictionary with any model-specific outputs
         """
-
         # embed positions
         positions = (
             self.embed_positions(
@@ -596,7 +662,7 @@ class Assigner(FairseqEncoder):
 
         x = self.feature_extractor(encoded)
         x = self.proj(x)[:, :, 0]
-        x = torch.sigmoid(x)
+        x = torch.sigmoid(x) + eps
         x = x * (~padding_mask)
 
         return x
@@ -695,7 +761,7 @@ class Conv2DFeatureExtractionModel(nn.Module):
     def forward(self, x):
         if self.output == 'same':
             length = x.size(1)
-            x = F.pad(x, [0,0,0,50,0,0])
+            x = F.pad(x, [0,0,0,20,0,0])
         x = x.transpose(1,2)
 
         for conv in self.conv_layers:
@@ -714,6 +780,13 @@ def Embedding(num_embeddings, embedding_dim, padding_idx):
     nn.init.normal_(m.weight, mean=0, std=embedding_dim ** -0.5)
     nn.init.constant_(m.weight[padding_idx], 0)
     return m
+
+
+def build_embedding(dictionary, embed_dim):
+    num_embeddings = len(dictionary)
+    padding_idx = dictionary.pad()
+    emb = Embedding(num_embeddings, embed_dim, padding_idx)
+    return emb
 
 
 @register_model_architecture("wav2vec_seq2seq", "wav2vec_seq2seq")
@@ -754,4 +827,6 @@ def ctc_seq2seq_architecture(args):
 def cif_architecture(args):
     args.extractor_mode = getattr(args, "extractor_mode", 'default')
     args.conv_bias = getattr(args, "conv-bias", False)
+    args.lambda_qua = getattr(args, "lambda_qua", 0.1)
+    args.lambda_cp = getattr(args, "lambda_cp", 0.1)
     seq2seq_architecture(args)

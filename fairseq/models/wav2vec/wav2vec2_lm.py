@@ -30,10 +30,8 @@ from fairseq.modules import (
 from .wav2vec2_ctc import add_common_args, base_architecture
 from .wav2vec2_seq2seq import CIFModel, Wav2VecEncoder, Linear, cif_architecture, add_decoder_args
 
-
 PAD_IDX = 1
 EOS_IDX = 2
-BLK_IDX = -1
 
 
 def add_mixer_args(parser):
@@ -41,17 +39,12 @@ def add_mixer_args(parser):
         "--dim-hidden-mixer", type=int, help="dim-hidden-mixer"
     )
     parser.add_argument(
-        "--lambda-qua", type=float, help="lambda-qua"
-    )
-    parser.add_argument(
         "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
     )
     parser.add_argument(
         "--lm-path", type=str, help="dim-hidden-mixer"
     )
-    parser.add_argument(
-        "--teacher-forcing-updates", type=int, help="is teacher-forcing"
-    )
+
 
 @register_model("wav2vec_ctc_lm")
 class W2V_CTC_MIX_LM(CIFModel):
@@ -60,7 +53,6 @@ class W2V_CTC_MIX_LM(CIFModel):
         self.mixer = mixer
         self.lm = lm
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
-        self.num_updates = 0
 
     @staticmethod
     def add_args(parser):
@@ -158,11 +150,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         super().__init__(args, encoder, assigner, lm)
         self.mixer = mixer
         self.lm = lm
-        self.lm.eval()
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
-        self.num_updates = 0
-        self.teacher_forcing_updates = args.teacher_forcing_updates
-        # self.phone_fc = nn.Linear(encoder.d, lm.dim_output, bias=True)
 
     @staticmethod
     def add_args(parser):
@@ -205,9 +193,11 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
     def forward(self, **kwargs):
         encoder_output = self.encoder(tbc=False, **kwargs)
         alphas = self.assigner(encoder_output)
-        _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
+        _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         cif_outputs = self.cif(encoder_output, _alphas)
 
+        if torch.isnan(_alphas.sum() + alphas.sum() + cif_outputs.sum()):
+            import pdb; pdb.set_trace()
         if torch.round(_alphas.sum(-1)).eq(0).sum() > 1:
             import pdb; pdb.set_trace()
         if cif_outputs.size(1) != kwargs["prev_output_tokens"].size(1):
@@ -223,7 +213,8 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         else:
             logits = self.decode(encoded_shrunk=cif_outputs)
 
-        return {'logits': logits, 'len_logits': kwargs['target_lengths'], 'num_output': num_output}
+        return {'logits': logits, 'len_logits': kwargs['target_lengths'],
+                'alphas': alphas, 'num_output': num_output}
 
     # teacher-forcing
     def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
@@ -237,7 +228,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
             with torch.no_grad():
                 encoded_t = encoded_shrunk[:, t, :]
                 cur_logits_lm, _ = self.lm(prev_output_tokens, incremental_state=incremental_states[1])
-                cur_logits = self.mixer(torch.cat([encoded_t, cur_logits_lm[:, 0, :]], -1))
+                cur_logits = self.mixer(torch.cat([encoded_t[:, None, :], cur_logits_lm], -1))
                 logits = cur_logits
 
         elif prev_output_tokens is not None: # teacher-forcing
@@ -261,7 +252,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
                     cur_logits_lm, _ = self.lm(prev_decoded, incremental_state=incremental_state)
                 cur_logits = self.mixer(torch.cat([encoded_t, cur_logits_lm[:, 0, :]], -1))
                 list_logits.append(cur_logits)
-                cur_token = cur_logits_lm.argmax(-1, keepdim=True)
+                cur_token = cur_logits.argmax(-1, keepdim=True)
                 prev_decoded = torch.cat([prev_decoded, cur_token], 1)
 
             logits = torch.stack(list_logits, 1)
@@ -289,4 +280,3 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
 def w2v_lm_architecture(args):
     cif_architecture(args)
     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
-    args.lambda_qua = getattr(args, "lambda_qua", 0.1)

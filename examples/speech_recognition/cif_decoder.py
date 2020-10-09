@@ -201,15 +201,15 @@ class CIFDecoder(Seq2seqDecoder):
         scores = torch.zeros([batch_size]).to(device)
 
         for t in range(max_decode_len):
-            # i, preds, scores, logits, len_decoded, finished
+            # cur_logits: [B, 1, V]
             cur_logits = step_forward_fn(
                 prev_output_tokens=preds,
                 encoded_shrunk=encoder_output.encoder_out.transpose(0,1),
                 incremental_states=incremental_state,
                 t=t)
-
-            logits = torch.cat([logits, cur_logits[:, None, :]], 1)  # [batch, t, size_output]
-            z = F.log_softmax(cur_logits, dim=-1) # [batch, size_output]
+            assert cur_logits.size(1) == 1
+            logits = torch.cat([logits, cur_logits], 1)  # [batch, t, size_output]
+            z = F.log_softmax(cur_logits[:, 0, :], dim=-1) # [batch, size_output]
 
             # rank the combined scores
             next_scores, next_preds = torch.topk(z, k=1, sorted=True, dim=-1)

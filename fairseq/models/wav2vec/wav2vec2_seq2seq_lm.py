@@ -151,7 +151,6 @@ class TransformerDecoder_DF(TransformerDecoder):
 
         ft = self.freeze_lm_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
-            # self.lm.eval()
             logits_lm, _ = self.lm(prev_output_tokens,
                                    incremental_state=lm_incremental_state)
         x = torch.cat([x, logits_lm], -1)

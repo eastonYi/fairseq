@@ -47,8 +47,12 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
     def compute_loss(self, model, net_output, sample, reduction, log_probs):
         _number = net_output["num_output"]
         number = sample["target_lengths"].float()
-        qua_loss = torch.sqrt(torch.pow(_number - number, 2)).sum()
-
+        alphas = net_output["alphas"]
+        tmp = torch.where(alphas < 1e-5, torch.ones_like(alphas) * 1e-5, alphas)
+        cp_loss = (alphas * torch.log(tmp)).sum() / number.sum()
+        diff = torch.sqrt(torch.pow(_number - number, 2))
+        qua_loss = torch.where(diff < 1e-3, torch.zeros_like(diff), diff).sum() + \
+                   self.args.lambda_cp * cp_loss
         target = sample["target"] # no eos bos
         # N, T -> N * T
         target = target.view(-1)
