@@ -1,5 +1,5 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_cif_lm_ma
+SAVE_DIR=exp/finetune_w2v_cif_lm_ma_2
 W2V_PATH=../libri/wav2vec2_small.pt
 LM_PATH=../language_model/hkust/exp/lstm_hkust_char_add_callhome_ma/checkpoint_best.pt
 DATA_DIR=data/ma/hkust_style_char
@@ -13,8 +13,8 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --lambda-cp 0.0 --lambda-qua 0.01 \
 --w2v-path $W2V_PATH --lm-path $LM_PATH --not-add-ctc-blank --maximize-best-checkpoint-metric \
 --assigner-conv-layers '[(512,3,1)] * 2 + [(512,2,1)] * 1' --dim-hidden-mixer 1024 \
---decoder-embed-dim 768 --decoder-ffn-embed-dim 768 --decoder-layers 4 --decoder-layerdrop 0.0 \
---decoder-attention-heads 4 --decoder-learned-pos --decoder-normalize-before \
+--decoder-embed-dim 768 --decoder-ffn-embed-dim 768 --decoder-layers 1 --decoder-layerdrop 0.0 \
+--decoder-attention-heads 2 --decoder-learned-pos --decoder-normalize-before \
 --decoder-dropout 0.1 --decoder-attention-dropout 0.1 --decoder-activation-dropout 0.1 \
 --apply-mask --mask-selection static --mask-other 0 --mask-length 10 --mask-prob 0.5 --layerdrop 0.1 \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 \

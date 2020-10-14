@@ -310,6 +310,7 @@ class Wav2VecEncoder(FairseqEncoder):
             encoder_out["encoder_padding_mask"] = encoder_out[
                 "encoder_padding_mask"
             ].index_select(0, new_order)
+            
         return encoder_out
 
     def max_positions(self):

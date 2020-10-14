@@ -257,9 +257,8 @@ def validate_and_save(args, trainer, task, epoch_itr, valid_subsets, end_of_epoc
             args.validate_interval_updates > 0
             and num_updates > 0
             and num_updates % args.validate_interval_updates == 0
-            and num_updates >= args.validate_after_updates
         )
-    ) and not args.disable_validation
+    ) and not args.disable_validation and num_updates >= args.validate_after_updates
 
     # Validate
     valid_losses = [None]

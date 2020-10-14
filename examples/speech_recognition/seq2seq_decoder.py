@@ -44,20 +44,20 @@ class Seq2seqDecoder(object):
 
         return torch.LongTensor(list(idxs))
 
-    def decode(self, encoder_out):
+    def decode(self, encoder_out, max_decode_len=100):
         if self.beam > 1:
-            return self.beam_decode(encoder_out)
+            return self.beam_decode(encoder_out, max_decode_len)
         else:
-            return self.greedy_decode(encoder_out)
+            return self.greedy_decode(encoder_out, max_decode_len)
 
-    def beam_decode(self, encoder_output):
+    def beam_decode(self, encoder_output, max_decode_len=100):
         hypos = []
         beam_results, out_seq_len, beam_scores = self.batch_beam_decode(
             encoder_output,
             step_forward_fn=self.step_forward_fn,
             incremental_state=deepcopy(self.incremental_state),
             SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
-            beam_size=self.beam, max_decode_len=100)
+            beam_size=self.beam, max_decode_len=max_decode_len)
 
         for beam_result, scores, lengthes in zip(beam_results, beam_scores, out_seq_len):
             # beam_ids: beam x id; score: beam; length: beam
@@ -69,7 +69,7 @@ class Seq2seqDecoder(object):
 
         return hypos
 
-    def greedy_decode(self, encoder_output):
+    def greedy_decode(self, encoder_output, max_decode_len):
         hypos = []
 
         results, out_seq_len, scores = self.batch_greedy_decode(
@@ -77,7 +77,7 @@ class Seq2seqDecoder(object):
             step_forward_fn=self.step_forward_fn,
             incremental_state=deepcopy(self.incremental_state),
             SOS_ID=self.sos_idx, EOS_ID=self.eos_idx, vocab_size=self.vocab_size,
-            max_decode_len=100)
+            max_decode_len=max_decode_len)
 
         for result, score, length in zip(results, scores, out_seq_len):
             res = {'tokens': self.get_tokens(result[:length]),

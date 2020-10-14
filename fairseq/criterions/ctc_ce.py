@@ -16,12 +16,13 @@ from fairseq.logging.meters import safe_round
 
 @register_criterion("ctc_ce")
 class CtcCeCriterion(FairseqCriterion):
-    def __init__(self, task, sentence_avg):
+    def __init__(self, task):
         super().__init__(task)
         self.blk_idx = task.target_dictionary.index("<ctc_blank>")
         self.pad_idx = task.target_dictionary.pad()
-        self.bos_idx = task.target_dictionary.bos()
+        self.bos_idx = task.target_dictionary.eos()
         self.eos_idx = task.target_dictionary.eos()
+        self.vocab_size = len(task.dictionary)
 
     @staticmethod
     def add_args(parser):
@@ -40,17 +41,23 @@ class CtcCeCriterion(FairseqCriterion):
             pass  # this option might have been added from eval args
 
     def forward(self, model, sample, reduce=True):
-        net_output = model(**sample["net_input"])
-        encoder_output = net_output["encoder_output"]
-
+        # net_output = model(**sample["net_input"])
+        encoder_output = model.encoder(tbc=False, **sample["net_input"])
+        encoder_shrunk_output = model.ctc_shrink(encoder_output)
+        logits, _ = model.batch_greedy_decode(
+            encoder_shrunk_output,
+            SOS_ID=self.bos_idx,
+            vocab_size=self.vocab_size,
+            max_decode_len=60)
+        logits_ctc = encoder_output["encoder_out"]
         # (B, T, C) from the encoder
-        ctc_lprobs, lprobs = model.get_normalized_probs(net_output, log_probs=True)
+        ctc_lprobs, lprobs = model.get_normalized_probs(logits_ctc, logits, log_probs=True)
 
         len_ctc_logits = (~encoder_output["padding_mask"]).long().sum(-1)
         target = sample["target"] # without sos or eos
         target_lengths = sample["target_lengths"]
 
-        ctc_loss = self.cal_ctc_loss(ctc_lprobs, len_ctc_logits, target, target_lengths)
+        ctc_loss = self.cal_ctc_loss(ctc_lprobs, len_ctc_logits, target, target_lengths-1)
         if abs(lprobs.size(1) - target.size(1)) < 5:
             if lprobs.size(1) != target.size(1):
                 min_length = min(lprobs.size(1), target.size(1))

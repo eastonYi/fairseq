@@ -5,13 +5,14 @@
 import copy
 import math
 import numpy as np
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 from fairseq.models.fairseq_encoder import EncoderOut
-from fairseq import utils
+from fairseq import utils, checkpoint_utils, tasks
 from fairseq.models import (
     FairseqEncoder,
     FairseqDecoder,
@@ -26,6 +27,7 @@ from fairseq.modules import (
     TransformerDecoderLayer,
     TransposeLast,
     Fp32LayerNorm,
+    FairseqDropout,
     Fp32GroupNorm
 )
 
@@ -34,6 +36,14 @@ from .wav2vec2_ctc import add_common_args, Wav2VecEncoder, Linear, base_architec
 PAD_IDX = 1
 EOS_IDX = 2
 eps = 1e-7
+
+
+def build_embedding(dictionary, embed_dim):
+    num_embeddings = len(dictionary)
+    padding_idx = dictionary.pad()
+    emb = Embedding(num_embeddings, embed_dim, padding_idx)
+
+    return emb
 
 
 def add_decoder_args(parser):
@@ -137,16 +147,30 @@ class TransformerModel(FairseqEncoderDecoderModel):
         return cls(args, encoder, decoder)
 
     @classmethod
-    def build_encoder(cls, args):
-        return Wav2VecEncoder(args)
+    def build_encoder(cls, args, tgt_dict=None):
+        return Wav2VecEncoder(args, tgt_dict=tgt_dict)
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
         return TransformerDecoder(args, tgt_dict, embed_tokens)
 
+    def set_num_updates(self, num_updates):
+        """Set the number of parameters updates."""
+        super().set_num_updates(num_updates)
+        self.num_updates = num_updates
+
     def forward(self, **kwargs):
         encoder_out = self.encoder(tbc=False, **kwargs)
-        decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+        # decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+        if self.num_updates <= self.teacher_forcing_updates:
+            decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+        else:
+            with torch.no_grad():
+                decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+                decoded = decoder_out[0].argmax(-1)
+            encoder_out.prev_output_tokens = decoded
+            decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+
         return decoder_out
 
     def upgrade_state_dict_named(self, state_dict, name):
@@ -193,21 +217,11 @@ class TransformerCTCModel(TransformerModel):
 
         tgt_dict = task.target_dictionary
 
-        def build_embedding(dictionary, embed_dim):
-            num_embeddings = len(dictionary)
-            padding_idx = dictionary.pad()
-            emb = Embedding(num_embeddings, embed_dim, padding_idx)
-            return emb
-
         decoder_embed_tokens = build_embedding(tgt_dict, args.decoder_embed_dim)
 
         encoder = cls.build_encoder(args, tgt_dict)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
         return cls(args, encoder, decoder)
-
-    @classmethod
-    def build_encoder(cls, args, tgt_dict):
-        return Wav2VecEncoder(args, tgt_dict)
 
     def forward(self, **kwargs):
         encoder_out = self.encoder(tbc=False, **kwargs)
@@ -231,6 +245,139 @@ class TransformerCTCModel(TransformerModel):
         res.batch_first = True
 
         return ctc_res, res
+
+
+@register_model("wav2vec_ctc_shrink_seq2seq")
+class TransformerCTCShrinkModel(TransformerModel):
+
+    @staticmethod
+    def add_args(parser):
+        add_common_args(parser)
+        add_decoder_args(parser)
+        parser.add_argument(
+            "--w2v-ctc-path", type=str, help="is teacher-forcing"
+        )
+
+    def __init__(self, args, encoder, decoder, dictionary):
+        self.dictionary = dictionary
+        self.blank_id = dictionary.index("<ctc_blank>")
+        if getattr(args, "w2v_ctc_path", None):
+            print('load Wav2VecEncoder from {}'.format(args.w2v_ctc_path))
+            state = checkpoint_utils.load_checkpoint_to_cpu(args.w2v_ctc_path)
+            w2v_ctc_args = state["args"]
+            assert getattr(w2v_ctc_args, "w2v_ctc_path", None) is None # w2v_path is the pretrain model which should not have w2v_path
+            task = tasks.setup_task(w2v_ctc_args)
+            encoder = task.build_model(w2v_ctc_args)
+            print('restore w2v_ctc from {}'.format(args.w2v_ctc_path))
+            encoder.load_state_dict(state["model"], strict=True)
+
+        super().__init__(args, encoder, decoder)
+
+    @classmethod
+    def build_decoder(cls, args, tgt_dict, input_dim):
+        return FCDecoder(args, tgt_dict, input_dim)
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+
+        # make sure all arguments are present in older models
+        seq2seq_architecture(args)
+
+        if not hasattr(args, "max_source_positions"):
+            args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
+
+        tgt_dict = task.target_dictionary
+        tgt_dict.add_symbol("<ctc_blank>")
+
+        # decoder_embed_tokens = build_embedding(tgt_dict, args.decoder_embed_dim)
+        encoder = cls.build_encoder(args, tgt_dict)
+        decoder = cls.build_decoder(args, tgt_dict, args.decoder_embed_dim)
+        # decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
+
+        return cls(args, encoder, decoder, tgt_dict)
+
+    def forward(self, **kwargs):
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        encoder_shrunk_output = self.ctc_shrink(encoder_output)
+        decoder_output = self.decoder(encoder_out=encoder_shrunk_output, **kwargs)
+
+        return decoder_output
+
+    def ctc_shrink(self, encoder_output):
+        from fairseq.utils import ctc_shrink, sequence_mask
+
+        encoder_padding_mask = encoder_output["encoder_padding_mask"]
+        encoded_shrunk, len_decode = ctc_shrink(
+            hidden=encoder_output["encoded"],
+            logits=encoder_output["encoder_out"],
+            len_logits=(~encoder_padding_mask).int().sum(-1),
+            blk=self.blank_id)
+
+        encoded_shrunk_padding_mask = ~sequence_mask(len_decode, dtype=torch.bool)
+
+        return EncoderOut(
+            encoder_out=encoded_shrunk.transpose(0,1),  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=encoded_shrunk_padding_mask,  # B x T
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+
+    def get_normalized_probs(self, logits_ctc, logits_ce, log_probs):
+        """Get normalized probabilities (or log probs) from a net's output."""
+        if log_probs:
+            ctc_res = utils.log_softmax(logits_ctc.float(), dim=-1)
+            res = utils.log_softmax(logits_ce.float(), dim=-1)
+        else:
+            ctc_res = utils.softmax(logits_ctc.float(), dim=-1)
+            res = utils.softmax(logits_ce.float(), dim=-1)
+        ctc_res.batch_first = True
+        res.batch_first = True
+
+        return ctc_res, res
+
+    def batch_greedy_decode(self, encoder_output, SOS_ID, vocab_size, max_decode_len=100):
+        """
+        encoder_output:
+            encoder_out=x,  # T x B x C
+            encoder_padding_mask=encoder_padding_mask,  # B x T
+            encoder_embedding=encoder_embedding,  # B x T x C
+            encoder_states=encoder_states,  # List[T x B x C]
+        """
+        len_encoded = (~encoder_output.encoder_padding_mask).sum(-1)
+        max_decode_len = len_encoded.max()
+        batch_size = len_encoded.size(0)
+        device = encoder_output.encoder_out.device
+        d_output = vocab_size
+
+        preds = torch.ones([batch_size, 1]).long().to(device) * SOS_ID
+        logits = torch.zeros([batch_size, 0, d_output]).float().to(device)
+        incremental_state = {}
+
+        for t in range(max_decode_len):
+            # cur_logits: [B, 1, V]
+            cur_logits = self.decoder(prev_output_tokens=preds,
+                                      encoder_out=encoder_output,
+                                      incremental_state=incremental_state)
+
+            cur_logits = cur_logits["logits"]
+            assert cur_logits.size(1) == 1
+            logits = torch.cat([logits, cur_logits], 1)  # [batch, t, size_output]
+            z = F.log_softmax(cur_logits[:, 0, :], dim=-1) # [batch, size_output]
+
+            # rank the combined scores
+            next_scores, next_preds = torch.topk(z, k=1, sorted=True, dim=-1)
+            next_preds = next_preds.squeeze(-1)
+
+            preds = torch.cat([preds, next_preds[:, None]], axis=1)  # [batch_size, i]
+
+        preds = preds[:, 1:]
+
+        return logits, preds
 
 
 @register_model("wav2vec_cif")
@@ -292,7 +439,7 @@ class CIFModel(TransformerModel):
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         cif_outputs = self.cif(encoder_output, _alphas)
 
-        if cif_outputs.abs().sum(-1).ne(0).sum() != kwargs['target_lengths'].sum():
+        if self.training and cif_outputs.abs().sum(-1).ne(0).sum() != kwargs['target_lengths'].sum():
             import pdb; pdb.set_trace()
 
         if self.num_updates <= self.teacher_forcing_updates:
@@ -359,7 +506,7 @@ class CIFModel(TransformerModel):
         return torch.stack(list_ls, 0)
 
     @staticmethod
-    def resize(alphas, target_lengths, noise=0.1, threshold=0.9):
+    def resize(alphas, target_lengths, noise=0.095, threshold=0.9):
         """
         alpha in thresh=0.9 | (0.91, noise-0.09)
         """
@@ -407,6 +554,75 @@ class CIFModel(TransformerModel):
             logits = self.decoder(prev_output_tokens=prev_output_tokens,
                                   encoder_out=encoder_output)
             logits = logits["logits"]
+
+        else: # self-decode
+            B, T, V = encoded_shrunk.size()
+            device = encoded_shrunk.device
+            prev_decoded = torch.ones([B, 1]).to(device).long() * EOS_IDX
+            list_logits = []
+            incremental_state = {}
+            for _ in torch.range(T):
+                cur_logits = self.decoder(prev_output_tokens=prev_decoded,
+                                          encoder_out=encoder_output,
+                                          incremental_state=incremental_state)
+                list_logits.append(cur_logits)
+                cur_token = cur_logits.argmax(-1, keepdim=True)
+                prev_decoded = torch.cat([prev_decoded, cur_token], 1)
+
+            logits = torch.stack(list_logits, 1)
+
+        return logits
+
+
+@register_model("wav2vec_cif_rnn")
+class CIF_RNN_Model(CIFModel):
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+
+        cif_rnn_architecture(args)
+
+        if not hasattr(args, "max_source_positions"):
+            args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
+
+        tgt_dict = task.target_dictionary
+
+        encoder = cls.build_encoder(args)
+        assigner = cls.build_assigner(args, encoder.d)
+        decoder_embed_tokens = build_embedding(tgt_dict, args.decoder_embed_dim)
+        decoder = cls.build_decoder(args,
+                                    embed_tokens=decoder_embed_tokens,
+                                    dim_input=encoder.d,
+                                    dim_output=len(tgt_dict))
+
+        return cls(args, encoder, assigner, decoder)
+
+    @classmethod
+    def build_decoder(cls, args, dim_input, dim_output, embed_tokens):
+        decoder = LSTMDecoder(
+            embed_tokens=embed_tokens,
+            dim_input=dim_input,
+            hidden_size=dim_input,
+            dim_output=dim_output,
+            num_layers=2,
+        )
+        return decoder
+
+    def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
+
+        encoder_output = encoded_shrunk
+        if incremental_states is not None: # step forward
+            assert prev_output_tokens is not None, t is not None
+            cur_logits = self.decoder(prev_output_tokens=prev_output_tokens,
+                                      encoder_out=encoder_output,
+                                      incremental_state=incremental_states)
+            logits = cur_logits
+        elif prev_output_tokens is not None: # teacher-forcing
+            logits = self.decoder(prev_output_tokens=prev_output_tokens,
+                                  encoder_out=encoder_output)
 
         else: # self-decode
             B, T, V = encoded_shrunk.size()
@@ -522,6 +738,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x, extra = self.extract_features(
             prev_output_tokens, encoder_out, incremental_state
         )
+        # x = self.output_layer(encoder_out.encoder_out.transpose(0,1) + x)
         x = self.output_layer(x)
         extra["logits"] = x
 
@@ -621,6 +838,182 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
+from fairseq.models.lstm import LSTMCell
+class LSTMDecoder(FairseqIncrementalDecoder):
+    """LSTM decoder."""
+    def __init__(
+        self, embed_tokens, dim_input, hidden_size=512, dim_output=512, num_layers=1,
+        dropout_in=0.1, dropout_out=0.1, residuals=False,
+    ):
+        super().__init__(None)
+        self.embed_tokens = embed_tokens
+        self.dropout_in_module = FairseqDropout(dropout_in, module_name=self.__class__.__name__)
+        self.dropout_out_module = FairseqDropout(dropout_out, module_name=self.__class__.__name__)
+        self.hidden_size = hidden_size
+        self.residuals = residuals
+        self.num_layers = num_layers
+        self.max_target_positions = 200
+
+        self.encoder_output_units = dim_input
+        if dim_input != hidden_size and dim_input != 0:
+            self.encoder_hidden_proj = Linear(dim_input, hidden_size)
+        else:
+            self.encoder_hidden_proj = None
+
+        # disable input feeding if there is no encoder
+        # input feeding is described in arxiv.org/abs/1508.04025
+        input_feed_size = 0 if dim_input == 0 else hidden_size
+        embed_dim = embed_tokens.embedding_dim
+        self.layers = nn.ModuleList([
+            LSTMCell(
+                input_size=input_feed_size + embed_dim if layer == 0 else hidden_size,
+                hidden_size=hidden_size,
+            )
+            for layer in range(num_layers)
+        ])
+
+        if hidden_size != dim_output:
+            self.fc_out = Linear(hidden_size, dim_output)
+        else:
+            self.fc_out = None
+
+    def forward(
+        self,
+        prev_output_tokens,
+        encoder_out: Optional[Tuple[Tensor, Tensor, Tensor, Tensor]] = None,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+        src_lengths: Optional[Tensor] = None,
+    ):
+        x = self.extract_features(
+            prev_output_tokens, encoder_out, incremental_state
+        )
+        return self.output_layer(x)
+
+    def extract_features(
+        self,
+        prev_output_tokens,
+        encoder_out,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+    ):
+        """
+        Similar to *forward* but only return features.
+        """
+        if incremental_state is not None and len(incremental_state) > 0:
+            prev_output_tokens = prev_output_tokens[:, -1:]
+
+        bsz, seqlen = prev_output_tokens.size()
+
+        # embed tokens
+        x = self.embed_tokens(prev_output_tokens.long())
+        x = self.dropout_in_module(x)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+        input_feed = encoder_out.transpose(0, 1)
+
+        # initialize previous states (or get from cache during incremental generation)
+        if incremental_state is not None and len(incremental_state) > 0:
+            prev_hiddens, prev_cells = self.get_cached_state(incremental_state)
+        else:
+            # setup recurrent cells
+            zero_state = x.new_zeros(bsz, self.hidden_size)
+            prev_hiddens = [zero_state for i in range(self.num_layers)]
+            prev_cells = [zero_state for i in range(self.num_layers)]
+            if self.encoder_hidden_proj is not None:
+                prev_hiddens = [self.encoder_hidden_proj(y) for y in prev_hiddens]
+
+        outs = []
+        for j in range(seqlen):
+            # input feeding: concatenate context vector from previous time step
+            input = torch.cat((x[j], input_feed[j]), dim=1)
+
+            for i, rnn in enumerate(self.layers):
+                # recurrent cell
+                hidden, cell = rnn(input, (prev_hiddens[i], prev_cells[i]))
+
+                # hidden state becomes the input to the next layer
+                input = self.dropout_out_module(hidden)
+                if self.residuals:
+                    input = input + prev_hiddens[i]
+
+                # save state for next time step
+                prev_hiddens[i] = hidden
+                prev_cells[i] = cell
+
+            out = hidden
+            out = self.dropout_out_module(out)
+
+            # save final output
+            outs.append(out)
+
+        # Stack all the necessary tensors together and store
+        prev_hiddens_tensor = torch.stack(prev_hiddens)
+        prev_cells_tensor = torch.stack(prev_cells)
+        cache_state = torch.jit.annotate(
+            Dict[str, Optional[Tensor]],
+            {
+                "prev_hiddens": prev_hiddens_tensor,
+                "prev_cells": prev_cells_tensor,
+                "input_feed": input_feed,
+            }
+        )
+        self.set_incremental_state(incremental_state, 'cached_state', cache_state)
+        # collect outputs across time steps
+        x = torch.cat(outs, dim=0).view(seqlen, bsz, self.hidden_size)
+
+        # T x B x C -> B x T x C
+        x = x.transpose(1, 0)
+
+        # srclen x tgtlen x bsz -> bsz x tgtlen x srclen
+
+        return x
+
+    def output_layer(self, x):
+        """Project features to the vocabulary size."""
+        if self.fc_out:
+            x = self.fc_out(x)
+
+        return x
+
+    def get_cached_state(
+        self,
+        incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
+    ) -> Tuple[List[Tensor], List[Tensor], Optional[Tensor]]:
+        cached_state = self.get_incremental_state(incremental_state, 'cached_state')
+        assert cached_state is not None
+        prev_hiddens_ = cached_state["prev_hiddens"]
+        assert prev_hiddens_ is not None
+        prev_cells_ = cached_state["prev_cells"]
+        assert prev_cells_ is not None
+        prev_hiddens = [prev_hiddens_[i] for i in range(self.num_layers)]
+        prev_cells = [prev_cells_[j] for j in range(self.num_layers)]
+        return prev_hiddens, prev_cells
+
+    def reorder_incremental_state(
+        self,
+        incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
+        new_order: Tensor,
+    ):
+        if incremental_state is None or len(incremental_state) == 0:
+            return
+        prev_hiddens, prev_cells = self.get_cached_state(incremental_state)
+        prev_hiddens = [p.index_select(0, new_order) for p in prev_hiddens]
+        prev_cells = [p.index_select(0, new_order) for p in prev_cells]
+        cached_state_new = torch.jit.annotate(
+            Dict[str, Optional[Tensor]],
+            {
+                "prev_hiddens": torch.stack(prev_hiddens),
+                "prev_cells": torch.stack(prev_cells)
+            }
+        )
+        self.set_incremental_state(incremental_state, 'cached_state', cached_state_new),
+        return
+
+    def max_positions(self):
+        """Maximum output length supported by the decoder."""
+        return self.max_target_positions
+
+
 class Assigner(FairseqEncoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
@@ -683,7 +1076,7 @@ class FCDecoder(FairseqDecoder):
 
     def __init__(self, args, dictionary, input_dim):
         super().__init__(dictionary)
-        self.proj = Linear(input_dim, len(dictionary))
+        self.proj = Linear(input_dim, len(dictionary), bias=True)
 
     def forward(self, encoded):
         """
@@ -823,10 +1216,20 @@ def ctc_seq2seq_architecture(args):
     base_architecture(args)
 
 
+@register_model_architecture("wav2vec_ctc_shrink_seq2seq", "wav2vec_ctc_shrink_seq2seq")
+def ctc_shrink_seq2seq_architecture(args):
+    seq2seq_architecture(args)
+
+
 @register_model_architecture("wav2vec_cif", "wav2vec_cif")
 def cif_architecture(args):
     args.extractor_mode = getattr(args, "extractor_mode", 'default')
     args.conv_bias = getattr(args, "conv-bias", False)
-    args.lambda_qua = getattr(args, "lambda_qua", 0.1)
+    args.lambda_qua = getattr(args, "lambda_qua", 0.05)
     args.lambda_cp = getattr(args, "lambda_cp", 0.1)
     seq2seq_architecture(args)
+
+
+@register_model_architecture("wav2vec_cif_rnn", "wav2vec_cif_rnn")
+def cif_rnn_architecture(args):
+    cif_architecture(args)

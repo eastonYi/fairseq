@@ -7,7 +7,7 @@
 
 import os
 
-from fairseq.data import Dictionary, AddTargetDataset
+from fairseq.data import Dictionary, AddTargetDataset, FileAudioDataset
 from .audio_pretraining import AudioUnsuperviseTrainingTask
 from . import register_task
 
@@ -63,7 +63,16 @@ class AudioCtcTask(AudioUnsuperviseTrainingTask):
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
-        AudioUnsuperviseTrainingTask.load_dataset(self, split, **kwargs)
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
 
         label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
         labels = self.load_labels(label_path)
@@ -109,7 +118,16 @@ class AudioCifTask(AudioCtcTask):
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
-        AudioUnsuperviseTrainingTask.load_dataset(self, split, **kwargs)
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
 
         label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
         labels = self.load_labels(label_path)
@@ -156,7 +174,16 @@ class AudioSeq2seqTask(AudioCtcTask):
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
-        AudioUnsuperviseTrainingTask.load_dataset(self, split, **kwargs)
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
 
         label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
         labels = self.load_labels(label_path)
@@ -183,7 +210,16 @@ class AudioCtcCeTask(AudioCtcTask):
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
-        AudioUnsuperviseTrainingTask.load_dataset(self, split, **kwargs)
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
 
         label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
         labels = self.load_labels(label_path)

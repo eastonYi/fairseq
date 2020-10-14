@@ -1,5 +1,5 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_lm_ma
+SAVE_DIR=exp/finetune_w2v_lm_ma_2
 W2V_PATH=../libri/wav2vec2_small.pt
 LM_PATH=../language_model/hkust/exp/lstm_hkust_char_add_callhome_ma/checkpoint_best.pt
 DATA_DIR=data/ma/hkust_style_char
@@ -9,6 +9,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR \
 --train-subset train --valid-subset dev --no-epoch-checkpoints \
 --labels $label_type --num-workers 4 --max-update 80000 \
+--lambda-cp 0.0 --lambda-qua 0.01 \
 --arch wav2vec_lm --task audio_cif --criterion qua_ce_acc --best-checkpoint-metric acc \
 --w2v-path $W2V_PATH --lm-path $LM_PATH --not-add-ctc-blank --maximize-best-checkpoint-metric \
 --assigner-conv-layers '[(512,5,1)] * 2 + [(512,3,1)] * 2 + [(512,2,1)] * 1' --dim-hidden-mixer 1024 \

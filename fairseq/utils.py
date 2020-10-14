@@ -656,7 +656,7 @@ def sequence_mask(lengths, maxlen=None, depth=None, dtype=torch.float):
     return mask.type(dtype)
 
 
-def ctc_shrink(hidden, logits, pad, blk, at_least_one=False):
+def ctc_shrink(hidden, logits, len_logits, blk, at_least_one=True):
     """only count the first one for the repeat freams
     """
     device = logits.device
@@ -668,12 +668,11 @@ def ctc_shrink(hidden, logits, pad, blk, at_least_one=False):
     list_fires = []
     token_prev = torch.ones(B).to(device) * -1
     blk_batch = torch.ones(B).to(device) * blk
-    pad_batch = torch.ones(B).to(device) * pad
 
     for t in range(T):
         token = tokens[:, t]
         fire_place = torch.logical_and(token != blk_batch, token != token_prev)
-        fire_place = torch.logical_and(fire_place, token != pad_batch)
+        fire_place = torch.logical_and(fire_place, t < len_logits)
         list_fires.append(fire_place)
         token_prev = token
 
