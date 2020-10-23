@@ -476,17 +476,17 @@ class FairseqTask(object):
         """Return the max input length allowed by the task."""
         return None
 
-    @property
-    def source_dictionary(self):
-        """Return the source :class:`~fairseq.data.Dictionary` (if applicable
-        for this task)."""
-        raise NotImplementedError
-
-    @property
-    def target_dictionary(self):
-        """Return the target :class:`~fairseq.data.Dictionary` (if applicable
-        for this task)."""
-        raise NotImplementedError
+    # @property
+    # def source_dictionary(self):
+    #     """Return the source :class:`~fairseq.data.Dictionary` (if applicable
+    #     for this task)."""
+    #     raise NotImplementedError
+    #
+    # @property
+    # def target_dictionary(self):
+    #     """Return the target :class:`~fairseq.data.Dictionary` (if applicable
+    #     for this task)."""
+    #     raise NotImplementedError
 
 
 class LegacyFairseqTask(FairseqTask):

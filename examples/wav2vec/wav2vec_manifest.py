@@ -17,11 +17,13 @@ import random
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('root', metavar='DIR', help='root directory containing flac files to index')
-    parser.add_argument('--valid-percent', default=0.01, type=float, metavar='D',
+    parser.add_argument('--valid-percent', default=0.0, type=float, metavar='D',
                         help='percentage of data to use as validation set (between 0 and 1)')
     parser.add_argument('--dest', default='.', type=str, metavar='DIR', help='output directory')
     parser.add_argument('--ext', default='flac', type=str, metavar='EXT', help='extension to look for')
     parser.add_argument('--seed', default=42, type=int, metavar='N', help='random seed')
+    parser.add_argument('--train', default='train.tsv', type=str, metavar='N', help='train.tsv')
+    parser.add_argument('--valid', default='valid.tsv', type=str, metavar='N', help='valid.tsv')
     parser.add_argument('--path-must-contain', default=None, type=str, metavar='FRAG',
                         help='if set, path must contain this substring for a file to be included in the manifest')
     return parser
@@ -34,8 +36,8 @@ def main(args):
     search_path = os.path.join(dir_path, '**/*.' + args.ext)
     rand = random.Random(args.seed)
 
-    with open(os.path.join(args.dest, 'train.tsv'), 'w') as train_f, open(
-            os.path.join(args.dest, 'valid.tsv'), 'w') as valid_f:
+    with open(os.path.join(args.dest, args.train), 'w') as train_f, \
+         open(os.path.join(args.dest, args.valid), 'w') as valid_f:
         print(dir_path, file=train_f)
         print(dir_path, file=valid_f)
 

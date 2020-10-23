@@ -213,13 +213,14 @@ class Wav2VecEncoder(FairseqEncoder):
             "feature_grad_mult": args.feature_grad_mult,
         }
         if getattr(args, "w2v_args", None) is None:
-            args.w2v_path = '../libri/wav2vec2_small.pt'
             print('load Wav2VecEncoder from {}'.format(args.w2v_path))
             state = checkpoint_utils.load_checkpoint_to_cpu(
                 args.w2v_path, arg_overrides
             )
             w2v_args = state["args"]
             assert getattr(w2v_args, "w2v_path", None) is None # w2v_path is the pretrain model which should not have w2v_path
+            # if getattr(w2v_args, "w2v_path", None):
+            #     w2v_args.w2v_path = '../libri/wav2vec2_small.pt'
         else:
             state = None
             w2v_args = args.w2v_args
@@ -231,7 +232,6 @@ class Wav2VecEncoder(FairseqEncoder):
         model = task.build_model(w2v_args)
 
         if state is not None and not args.no_pretrained_weights:
-            print('restore Wav2VecEncoder from {}'.format(args.w2v_path))
             model.load_state_dict(state["model"], strict=True)
 
         model.remove_pretraining_modules()
@@ -310,7 +310,7 @@ class Wav2VecEncoder(FairseqEncoder):
             encoder_out["encoder_padding_mask"] = encoder_out[
                 "encoder_padding_mask"
             ].index_select(0, new_order)
-            
+
         return encoder_out
 
     def max_positions(self):
