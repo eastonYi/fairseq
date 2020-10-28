@@ -228,11 +228,19 @@ class Wav2VecEncoder(FairseqEncoder):
         assert args.normalize == w2v_args.normalize, 'Fine-tuning works best when data normalization is the same'
 
         w2v_args.data = args.data
-        task = tasks.setup_task(w2v_args)
-        model = task.build_model(w2v_args)
 
-        if state is not None and not args.no_pretrained_weights:
-            model.load_state_dict(state["model"], strict=True)
+        if w2v_args.arch == 'wav2vec2_semi':
+            w2v_args.arch = 'wav2vec2'
+            w2v_args.task = 'audio_pretraining'
+            task = tasks.setup_task(w2v_args)
+            model = task.build_model(w2v_args)
+            model.load_state_dict(state["model"], strict=False)
+        else:
+            task = tasks.setup_task(w2v_args)
+            model = task.build_model(w2v_args)
+
+            if state is not None and not args.no_pretrained_weights:
+                model.load_state_dict(state["model"], strict=True)
 
         model.remove_pretraining_modules()
 

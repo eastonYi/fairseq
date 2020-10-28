@@ -156,19 +156,22 @@ class FileAudioDataset(RawAudioDataset):
         )
 
         self.fnames = []
+        self.skip_ids = []
 
         skipped = 0
         with open(manifest_path, "r") as f:
             self.root_dir = f.readline().strip()
-            for line in f:
+            for i, line in enumerate(f):
                 items = line.strip().split("\t")
                 assert len(items) == 2, line
                 sz = int(items[1])
                 if min_length is not None and sz < min_length:
                     skipped += 1
+                    self.skip_ids.append(i)
                     continue
                 if max_sample_size is not None and sz > max_sample_size:
                     skipped += 1
+                    self.skip_ids.append(i)
                     continue
                 self.fnames.append(items[0])
                 self.sizes.append(sz)
@@ -181,4 +184,5 @@ class FileAudioDataset(RawAudioDataset):
         wav, curr_sample_rate = sf.read(fname)
         feats = torch.from_numpy(wav).float()
         feats = self.postprocess(feats, curr_sample_rate)
+
         return {"id": index, "source": feats}

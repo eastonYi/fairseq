@@ -274,15 +274,15 @@ class Trainer(object):
             state = checkpoint_utils.load_checkpoint_to_cpu(filename)
             # load model parameters
             try:
-                print("\t\t\tWARNING!!!!!!\n\n\n\t\t\tYOU DELETE THE w2v_encoder.proj !!!\n\n\n")
-                del state["model"]['w2v_encoder.proj.weight']
-                del state["model"]['w2v_encoder.proj.bias']
-                self.get_model().load_state_dict(
-                    state["model"], strict=False, args=self.args
-                )
+                # print("\t\t\tWARNING!!!!!!\n\n\n\t\t\tYOU DELETE THE w2v_encoder.proj !!!\n\n\n")
+                # del state["model"]['w2v_encoder.proj.weight']
+                # del state["model"]['w2v_encoder.proj.bias']
                 # self.get_model().load_state_dict(
-                #     state["model"], strict=True, args=self.args
+                #     state["model"], strict=False, args=self.args
                 # )
+                self.get_model().load_state_dict(
+                    state["model"], strict=True, args=self.args
+                )
                 if utils.has_parameters(self.get_criterion()):
                     self.get_criterion().load_state_dict(
                         state["criterion"], strict=True

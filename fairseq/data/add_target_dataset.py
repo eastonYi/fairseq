@@ -12,14 +12,22 @@ from . import data_utils
 class AddTargetDataset(BaseWrapperDataset):
     def __init__(self, dataset, labels, pad, bos, eos, batch_targets, process_label=None):
         super().__init__(dataset)
-        self.labels = labels
+        self.labels = self.del_skip(dataset.skip_ids, labels)
         self.batch_targets = batch_targets
         self.pad = pad
         self.bos = bos # defaultly reuse eos
         self.eos = eos
         self.process_label = process_label
 
+        assert len(dataset) == len(labels), 'wav: {}; trans: {}'.format(len(dataset), len(self.labels))
         assert batch_targets
+
+    @staticmethod
+    def del_skip(list_to_skip, labels):
+        if list_to_skip:
+            for i in list_to_skip[::-1]:
+                labels.pop(i)
+        return labels
 
     def get_label(self, index):
         return self.labels[index] if self.process_label is None else self.process_label(self.labels[index])
@@ -40,7 +48,15 @@ class AddTargetDataset(BaseWrapperDataset):
             return collated
         indices = set(collated["id"].tolist())
 
-        if self.bos is not None and self.eos is not None: # seq2seq
+        if self.pad is None: # ali
+            target = [s["label"] for s in samples if s["id"] in indices]
+            min_len = min([len(tokens) for tokens in target])
+            target = [tokens[:min_len] for tokens in target]
+            collated["target"] = data_utils.collate_tokens(target, pad_idx=1, left_pad=False)
+
+            return collated
+
+        elif self.bos is not None and self.eos is not None: # seq2seq
             eos = torch.ones([1]).int() * self.eos
             target = [torch.cat([s["label"], eos], dim=-1) for s in samples if s["id"] in indices]
             bos = torch.ones([1]).int() * self.bos
