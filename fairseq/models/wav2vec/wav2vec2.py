@@ -351,14 +351,14 @@ class Wav2Vec2Model(BaseFairseqModel):
         final_dim = args.final_dim if args.final_dim > 0 else args.encoder_embed_dim
 
         if args.quantize_targets:
-            vq_dim = args.latent_dim if args.latent_dim > 0 else final_dim
+            vq_dim = args.latent_dim if args.latent_dim > 0 else final_dim # 256
             self.quantizer = GumbelVectorQuantizer(
-                dim=self.embed,
-                num_vars=args.latent_vars,
-                temp=eval(args.latent_temp),
-                groups=args.latent_groups,
+                dim=self.embed, # 512
+                num_vars=args.latent_vars, # 320
+                temp=eval(args.latent_temp), # (2,0.5,0.999995)
+                groups=args.latent_groups, # 2
                 combine_groups=False,
-                vq_dim=vq_dim,
+                vq_dim=vq_dim, # 256
                 time_first=True,
             )
             self.project_q = nn.Linear(vq_dim, final_dim)
@@ -527,7 +527,7 @@ class Wav2Vec2Model(BaseFairseqModel):
         return logits
 
     def forward(self, source, padding_mask=None, mask=True, features_only=False):
-        
+
         if self.feature_grad_mult > 0:
             features = self.feature_extractor(source)
             if self.feature_grad_mult != 1.0:
@@ -601,7 +601,6 @@ class Wav2Vec2Model(BaseFairseqModel):
                 neg_cands, *_ = self.quantizer(unmasked_features, produce_targets=False)
                 negs, _ = self.sample_negatives(neg_cands, y.size(1))
                 negs = self.project_q(negs)
-
             else:
                 negs, _ = self.sample_negatives(y, y.size(1))
 

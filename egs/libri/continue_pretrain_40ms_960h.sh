@@ -1,5 +1,6 @@
 gpu=$1
 SAVE_DIR=exp/pretrain_40ms_960h/
+W2V_PATH=../libri/exp/semi_pretrain_v1_40ms_960h_4/checkpoint_best.pt
 DATA_DIR=data
 
 # from scratch
@@ -7,7 +8,7 @@ DATA_DIR=data
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR --num-workers 4 \
 --task audio_pretraining --criterion wav2vec --arch wav2vec2 --enable-padding \
---train-subset train_960h --valid-subset dev_clean --no-epoch-checkpoints \
+--w2v-path $W2V_PATH --train-subset train_960h --valid-subset dev_clean --no-epoch-checkpoints \
 --log-keys '["prob_perplexity","code_perplexity","temp"]' --quantize-targets --extractor-mode default \
 --conv-feature-layers '[(512, 10, 5)] + [(512, 3, 2)] * 4 + [(512,2,2)] * 3' --final-dim 256 --latent-vars 320 \
 --latent-groups 2 --latent-temp '(2,0.5,0.999995)' --infonce --optimizer adam \

@@ -51,8 +51,7 @@ class AddTargetDataset(BaseWrapperDataset):
         if self.pad is None: # ali
             target = [s["label"] for s in samples if s["id"] in indices]
             min_len = min([len(tokens) for tokens in target])
-            target = [tokens[:min_len] for tokens in target]
-            collated["target"] = data_utils.collate_tokens(target, pad_idx=1, left_pad=False)
+            collated["target"] = data_utils.collate_tokens(target, pad_idx=1, left_pad=False)[:, :min_len]
 
             return collated
 

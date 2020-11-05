@@ -83,6 +83,7 @@ class GumbelVectorQuantizer(nn.Module):
         self.curr_temp = max(
             self.max_temp * self.temp_decay ** num_updates, self.min_temp
         )
+        
     def get_codebook_indices(self):
         if self.codebook_indices is None:
             from itertools import product

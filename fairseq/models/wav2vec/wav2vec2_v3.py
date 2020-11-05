@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import math
 import numpy as np
 
@@ -12,27 +13,29 @@ import torch.nn.functional as F
 
 from typing import List, Tuple
 
-from fairseq import utils, checkpoint_utils
+from fairseq import utils
 from fairseq.data.data_utils import compute_mask_indices
 from fairseq.models import BaseFairseqModel, register_model, register_model_architecture
 from fairseq.modules import (
     Fp32GroupNorm,
     Fp32LayerNorm,
     GradMultiply,
+    GumbelVectorQuantizer,
     LayerNorm,
     MultiheadAttention,
     SamePad,
     TransposeLast,
 )
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
+from fairseq.utils import buffered_arange
 
 
-@register_model("wav2vec2_v1")
-class Wav2Vec2V1Model(BaseFairseqModel):
+@register_model("wav2vec2_v3")
+class Wav2Vec2V3Model(BaseFairseqModel):
     @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
-        parser.add_argument("--w2v-path", default=None, help="path to wav2vec 2.0 model")
+
         parser.add_argument(
             "--extractor-mode",
             choices=["default", "layer_norm"],
@@ -121,9 +124,44 @@ class Wav2Vec2V1Model(BaseFairseqModel):
         )
 
         parser.add_argument(
+            "--quantize-targets", action="store_true", help="use quantized targets"
+        )
+
+        parser.add_argument(
+            "--quantize-input", action="store_true", help="use quantized inputs"
+        )
+
+        parser.add_argument(
+            "--same-quantizer",
+            action="store_true",
+            help="use same quantizer for inputs and targets",
+        )
+
+        parser.add_argument(
             "--feature-grad-mult",
             type=float,
             help="multiply feature extractor var grads by this",
+        )
+
+        parser.add_argument(
+            "--latent-vars",
+            type=int,
+            metavar="N",
+            help="number of latent variables V in each group of the codebook",
+        )
+
+        parser.add_argument(
+            "--latent-groups",
+            type=int,
+            metavar="N",
+            help="number of groups G of latent variables in the codebook",
+        )
+
+        parser.add_argument(
+            "--latent-dim",
+            type=int,
+            metavar="N",
+            help="if set, uses this dimensionality for latent variables. otherwise uses final_dim / latent_groups",
         )
 
         parser.add_argument("--mask-length", type=int, help="mask length")
@@ -209,6 +247,30 @@ class Wav2Vec2V1Model(BaseFairseqModel):
         )
 
         parser.add_argument(
+            "--num-negatives", type=int, metavar="N", help="number of negative examples"
+        )
+
+        parser.add_argument(
+            "--negatives-from-everywhere",
+            action="store_true",
+            help="sample negatives from everywhere, not just masked states",
+        )
+
+        parser.add_argument(
+            "--cross-sample-negatives",
+            type=int,
+            metavar="N",
+            help="num of cross sampled negatives",
+        )
+
+        parser.add_argument(
+            "--codebook-negatives",
+            type=int,
+            metavar="N",
+            help="num of codebook sampled negatives",
+        )
+
+        parser.add_argument(
             "--conv-pos",
             type=int,
             metavar="N",
@@ -220,6 +282,13 @@ class Wav2Vec2V1Model(BaseFairseqModel):
             type=int,
             metavar="N",
             help="number of groups for convolutional positional embedding",
+        )
+
+        parser.add_argument(
+            "--latent-temp",
+            type=str,
+            metavar="D",
+            help="temperature for latent variable sampling. can be tuple of 3 values (start, end, decay)",
         )
 
         parser.add_argument(
@@ -246,7 +315,7 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
         self.post_extract_proj = (
             nn.Linear(self.embed, args.encoder_embed_dim)
-            if self.embed != args.encoder_embed_dim
+            if self.embed != args.encoder_embed_dim and not args.quantize_input
             else None
         )
 
@@ -269,6 +338,52 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
         self.feature_grad_mult = args.feature_grad_mult
 
+        self.quantizer = None
+        self.input_quantizer = None
+
+        self.n_negatives = args.num_negatives
+        self.cross_sample_negatives = args.cross_sample_negatives
+        self.codebook_negatives = args.codebook_negatives
+        self.negatives_from_everywhere = args.negatives_from_everywhere
+
+        self.logit_temp = args.logit_temp
+
+        final_dim = args.final_dim if args.final_dim > 0 else args.encoder_embed_dim
+
+        if args.quantize_targets:
+            vq_dim = args.latent_dim if args.latent_dim > 0 else final_dim
+            self.quantizer = GumbelVectorQuantizer(
+                dim=self.embed,
+                num_vars=args.latent_vars,
+                temp=eval(args.latent_temp),
+                groups=args.latent_groups,
+                combine_groups=False,
+                vq_dim=vq_dim,
+                time_first=True,
+            )
+            self.project_q = nn.Linear(vq_dim, final_dim)
+        else:
+            self.project_q = nn.Linear(self.embed, final_dim)
+
+        if args.quantize_input:
+            if args.same_quantizer and self.quantizer is not None:
+                vq_dim = final_dim
+                self.input_quantizer = self.quantizer
+            else:
+                vq_dim = (
+                    args.latent_dim if args.latent_dim > 0 else args.encoder_embed_dim
+                )
+                self.input_quantizer = GumbelVectorQuantizer(
+                    dim=self.embed,
+                    num_vars=args.latent_vars,
+                    temp=eval(args.latent_temp),
+                    groups=args.latent_groups,
+                    combine_groups=False,
+                    vq_dim=vq_dim,
+                    time_first=True,
+                )
+            self.project_inp = nn.Linear(vq_dim, args.encoder_embed_dim)
+
         self.mask_emb = nn.Parameter(
             torch.FloatTensor(args.encoder_embed_dim).uniform_()
         )
@@ -276,12 +391,14 @@ class Wav2Vec2V1Model(BaseFairseqModel):
         self.encoder = TransformerEncoder(args)
         self.layer_norm = LayerNorm(self.embed)
 
-        self.phone_proj = nn.Linear(args.encoder_embed_dim, len(tgt_dict))
+        self.target_glu = None
+        if args.target_glu:
+            self.target_glu = nn.Sequential(
+                nn.Linear(final_dim, final_dim * 2), nn.GLU()
+            )
 
-        if getattr(args, "w2v_args", None) is None:
-            print('load Wav2VecEncoder from {}'.format(args.w2v_path))
-            state = checkpoint_utils.load_checkpoint_to_cpu(args.w2v_path)
-            self.load_state_dict(state["model"], strict=False)
+        self.final_proj = nn.Linear(args.encoder_embed_dim, final_dim)
+        self.phone_proj = nn.Linear(args.encoder_embed_dim, len(tgt_dict))
 
     def upgrade_state_dict_named(self, state_dict, name):
         super().upgrade_state_dict_named(state_dict, name)
@@ -337,7 +454,80 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
         return x, mask_indices
 
-    def forward(self, source, padding_mask=None, mask=True, features_only=False, **kwargs):
+    def sample_negatives(self, y, num):
+
+        if self.n_negatives == 0 and self.cross_sample_negatives == 0:
+            return y.new(0)
+
+        bsz, tsz, fsz = y.shape
+        y = y.view(-1, fsz)  # BTC => (BxT)C
+
+        cross_high = tsz * bsz
+        high = tsz
+        with torch.no_grad():
+            assert high > 1, f"{bsz,tsz,fsz}"
+
+            if self.n_negatives > 0:
+                tszs = (
+                    buffered_arange(num)
+                    .unsqueeze(-1)
+                    .expand(-1, self.n_negatives)
+                    .flatten()
+                )
+
+                neg_idxs = torch.randint(
+                    low=0, high=high - 1, size=(bsz, self.n_negatives * num)
+                )
+                neg_idxs[neg_idxs >= tszs] += 1
+
+            if self.cross_sample_negatives > 0:
+                tszs = (
+                    buffered_arange(num)
+                    .unsqueeze(-1)
+                    .expand(-1, self.cross_sample_negatives)
+                    .flatten()
+                )
+
+                cross_neg_idxs = torch.randint(
+                    low=0,
+                    high=cross_high - 1,
+                    size=(bsz, self.cross_sample_negatives * num),
+                )
+                cross_neg_idxs[cross_neg_idxs >= tszs] += 1
+
+        if self.n_negatives > 0:
+            for i in range(1, bsz):
+                neg_idxs[i] += i * high
+        else:
+            neg_idxs = cross_neg_idxs
+
+        if self.cross_sample_negatives > 0 and self.n_negatives > 0:
+            neg_idxs = torch.cat([neg_idxs, cross_neg_idxs], dim=1)
+
+        negs = y[neg_idxs.view(-1)]
+        negs = negs.view(
+            bsz, num, self.n_negatives + self.cross_sample_negatives, fsz
+        ).permute(
+            2, 0, 1, 3
+        )  # to NxBxTxC
+        return negs, neg_idxs
+
+    def compute_preds(self, x, y, negatives):
+
+        neg_is_pos = (y == negatives).all(-1)
+        y = y.unsqueeze(0)
+        targets = torch.cat([y, negatives], dim=0)
+
+        logits = torch.cosine_similarity(x.float(), targets.float(), dim=-1).type_as(x)
+
+        logits /= self.logit_temp
+
+        if neg_is_pos.any():
+            logits[1:][neg_is_pos] = float("-inf")
+
+        return logits
+
+    def forward(self, source, padding_mask=None, mask=True, features_only=False):
 
         if self.feature_grad_mult > 0:
             features = self.feature_extractor(source)
@@ -351,6 +541,7 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
         features = features.transpose(1, 2)
         features = self.layer_norm(features)
+        unmasked_features = features.clone()
 
         if padding_mask is not None:
             extra = padding_mask.size(1) % features.size(1)
@@ -363,24 +554,103 @@ class Wav2Vec2V1Model(BaseFairseqModel):
             features = self.post_extract_proj(features)
 
         features = self.dropout_input(features)
+        unmasked_features = self.dropout_features(unmasked_features)
+
+        num_vars = None
+        code_ppl = None
+        prob_ppl = None
+        curr_temp = None
+
+        if self.input_quantizer:
+            q = self.input_quantizer(features, produce_targets=False)
+            features = q["x"]
+            num_vars = q["num_vars"]
+            code_ppl = q["code_perplexity"]
+            prob_ppl = q["prob_perplexity"]
+            curr_temp = q["temp"]
+            features = self.project_inp(features)
 
         if mask:
             x, mask_indices = self.apply_mask(features, padding_mask)
+            if mask_indices is not None:
+                y = unmasked_features[mask_indices].view(
+                    unmasked_features.size(0), -1, unmasked_features.size(-1)
+                )
+            else:
+                y = unmasked_features
         else:
-            x = features; mask_indices = None
+            x = features
+            y = unmasked_features
+            mask_indices = None
 
-        x = self.encoder(x, padding_mask=padding_mask) # B, T, V
-        size = x.size()
-        x = x[mask_indices] # B, N, V
+        x = self.encoder(x, padding_mask=padding_mask)
 
         if features_only:
-            return {"x": x, "padding_mask": padding_mask, "mask_indices": mask_indices}
+            return {"x": x, "padding_mask": padding_mask}
 
-        x = self.phone_proj(x) # B, N, V
+        if self.quantizer:
+            q = self.quantizer(y, produce_targets=False)
+            y = q["x"]
+            num_vars = q["num_vars"]
+            code_ppl = q["code_perplexity"]
+            prob_ppl = q["prob_perplexity"]
+            curr_temp = q["temp"]
 
-        result = {"x": x, "padding_mask": padding_mask, "mask_indices": mask_indices, "features_pen": features_pen, "size": size}
+            y = self.project_q(y)
+
+            if self.negatives_from_everywhere:
+                neg_cands, *_ = self.quantizer(unmasked_features, produce_targets=False)
+                negs, _ = self.sample_negatives(neg_cands, y.size(1))
+                negs = self.project_q(negs)
+
+            else:
+                negs, _ = self.sample_negatives(y, y.size(1))
+
+            if self.codebook_negatives > 0:
+                cb_negs = self.quantizer.sample_from_codebook(
+                    y.size(0) * y.size(1), self.codebook_negatives
+                )
+                cb_negs = cb_negs.view(
+                    self.codebook_negatives, y.size(0), y.size(1), -1
+                )  # order doesnt matter
+                cb_negs = self.project_q(cb_negs)
+                negs = torch.cat([negs, cb_negs], dim=0)
+        else:
+            y = self.project_q(y)
+
+            if self.negatives_from_everywhere:
+                negs, _ = self.sample_negatives(unmasked_features, y.size(1))
+                negs = self.project_q(negs)
+            else:
+                negs, _ = self.sample_negatives(y, y.size(1))
+
+        logits_ali = self.phone_proj(x[mask_indices]) # N, V
+        x = x[mask_indices].view(x.size(0), -1, x.size(-1))
+
+        if self.target_glu:
+            y = self.target_glu(y)
+            negs = self.target_glu(negs)
+
+        x = self.final_proj(x)
+        x = self.compute_preds(x, y, negs)
+
+        result = {"x": x, "padding_mask": padding_mask, "mask_indices": mask_indices,
+                  "features_pen": features_pen, "logits_ali": logits_ali}
+
+        if prob_ppl is not None:
+            result["prob_perplexity"] = prob_ppl
+            result["code_perplexity"] = code_ppl
+            result["num_vars"] = num_vars
+            result["temp"] = curr_temp
 
         return result
+
+    def quantize(self, x):
+        assert self.quantizer is not None
+        x = self.feature_extractor(x)
+        x = x.transpose(1, 2)
+        x = self.layer_norm(x)
+        return self.quantizer.forward_idx(x)
 
     def extract_features(self, source, padding_mask, mask=False):
         res = self.forward(source, padding_mask, mask=mask, features_only=True)
@@ -388,14 +658,23 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
     def get_logits(self, net_output):
         logits = net_output["x"]
-
+        logits = logits.transpose(0, 2)
+        logits = logits.reshape(-1, logits.size(-1))
         return logits
 
+    def get_ali_logits(self, net_output):
+
+        return net_output["logits_ali"]
+
     def get_targets(self, sample, net_output, expand_steps=True):
-        # x = net_output["x"]
+        x = net_output["x"]
+        return x.new_zeros(x.size(1) * x.size(2), dtype=torch.long)
+
+    def get_ali_targets(self, sample, net_output, expand_steps=True):
         ali = sample["target"]
         mask_indices = net_output["mask_indices"]
         if mask_indices.size(1) != ali.size(1):
+            import pdb; pdb.set_trace()
             assert 0 < ali.size(1) - mask_indices.size(1) < 5
             targets = ali[:, :mask_indices.size(1)][mask_indices]
         else:
@@ -406,13 +685,22 @@ class Wav2Vec2V1Model(BaseFairseqModel):
     def get_extra_losses(self, net_output):
         pen = []
 
+        if "prob_perplexity" in net_output:
+            pen.append(
+                (net_output["num_vars"] - net_output["prob_perplexity"])
+                / net_output["num_vars"]
+            )
+
         if "features_pen" in net_output:
             pen.append(net_output["features_pen"])
 
         return pen
 
     def remove_pretraining_modules(self):
-        self.phone_proj = None
+        self.quantizer = None
+        self.project_q = None
+        self.target_glu = None
+        self.final_proj = None
 
 
 class ConvFeatureExtractionModel(nn.Module):
@@ -692,7 +980,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         return x, attn
 
 
-@register_model_architecture("wav2vec2_v1", "wav2vec2_v1")
+@register_model_architecture("wav2vec2_v3", "wav2vec2_v3")
 def base_architecture(args):
     args.extractor_mode = getattr(args, "extractor_mode", "default")
 
@@ -707,6 +995,8 @@ def base_architecture(args):
     args.attention_dropout = getattr(args, "attention_dropout", 0.1)
     args.activation_dropout = getattr(args, "activation_dropout", 0.0)
 
+    args.final_dim = getattr(args, "final_dim", 0)
+
     args.layer_norm_first = getattr(args, "layer_norm_first", False)
     args.encoder_layerdrop = getattr(args, "encoder_layerdrop", 0.0)
 
@@ -716,7 +1006,17 @@ def base_architecture(args):
     conv_feature_layers += " + [(512, 1, 1)]"
     args.conv_feature_layers = getattr(args, "conv_feature_layers", conv_feature_layers)
 
+    args.logit_temp = getattr(args, "logit_temp", 0.1)
+
+    args.quantize_targets = getattr(args, "quantize_targets", False)
+    args.quantize_input = getattr(args, "quantize_input", False)
+    args.same_quantizer = getattr(args, "same_quantizer", False)
+
     args.feature_grad_mult = getattr(args, "feature_grad_mult", 1.0)
+
+    args.latent_vars = getattr(args, "latent_vars", 320)
+    args.latent_groups = getattr(args, "latent_groups", 2)
+    args.latent_dim = getattr(args, "latent_dim", 0)
 
     args.mask_length = getattr(args, "mask_length", 10)
     args.mask_prob = getattr(args, "mask_prob", 0.65)
@@ -735,7 +1035,16 @@ def base_architecture(args):
     args.dropout_input = getattr(args, "dropout_input", 0)
     args.dropout_features = getattr(args, "dropout_features", 0)
 
+    args.num_negatives = getattr(args, "num_negatives", 100)
+    args.negatives_from_everywhere = getattr(args, "negatives_from_everywhere", False)
+    args.cross_sample_negatives = getattr(args, "cross_sample_negatives", 0)
+    args.codebook_negatives = getattr(args, "codebook_negatives", 0)
+
     args.conv_pos = getattr(args, "conv_pos", 128)
     args.conv_pos_groups = getattr(args, "conv_pos_groups", 16)
+
+    args.latent_temp = getattr(args, "latent_temp", "(2,0.5,0.999995)")
+
+    args.target_glu = getattr(args, "target_glu", False)
 
     args.conv_bias = getattr(args, "conv_bias", False)

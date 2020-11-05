@@ -212,15 +212,15 @@ class Wav2VecEncoder(FairseqEncoder):
             "encoder_layerdrop": args.layerdrop,
             "feature_grad_mult": args.feature_grad_mult,
         }
-        if getattr(args, "w2v_args", None) is None:
+        if args.w2v_path:
             print('load Wav2VecEncoder from {}'.format(args.w2v_path))
             state = checkpoint_utils.load_checkpoint_to_cpu(
                 args.w2v_path, arg_overrides
             )
             w2v_args = state["args"]
-            assert getattr(w2v_args, "w2v_path", None) is None # w2v_path is the pretrain model which should not have w2v_path
-            # if getattr(w2v_args, "w2v_path", None):
-            #     w2v_args.w2v_path = '../libri/wav2vec2_small.pt'
+            # assert getattr(w2v_args, "w2v_path", None) is None # w2v_path is the pretrain model which should not have w2v_path
+            if getattr(w2v_args, "w2v_path", None):
+                w2v_args.w2v_path = '../libri/wav2vec2_small.pt'
         else:
             state = None
             w2v_args = args.w2v_args
@@ -229,7 +229,7 @@ class Wav2VecEncoder(FairseqEncoder):
 
         w2v_args.data = args.data
 
-        if w2v_args.arch == 'wav2vec2_semi':
+        if w2v_args.arch in ('wav2vec2_semi', 'wav2vec2_v1', 'wav2vec2_v2'):
             w2v_args.arch = 'wav2vec2'
             w2v_args.task = 'audio_pretraining'
             task = tasks.setup_task(w2v_args)

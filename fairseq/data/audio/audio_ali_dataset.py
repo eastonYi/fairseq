@@ -13,11 +13,12 @@ import torch
 import torch.nn.functional as F
 
 from .. import FairseqDataset
+from .raw_audio_dataset import FileAudioDataset
 
 logger = logging.getLogger(__name__)
 
 
-class RawAudioDataset(FairseqDataset):
+class AudioAliDataset(FileAudioDataset):
     def __init__(
         self,
         sample_rate,
@@ -134,7 +135,7 @@ class RawAudioDataset(FairseqDataset):
         return np.lexsort(order)[::-1]
 
 
-class FileAudioDataset(RawAudioDataset):
+class AudioAliDataset(FileAudioDataset):
     def __init__(
         self,
         manifest_path,
