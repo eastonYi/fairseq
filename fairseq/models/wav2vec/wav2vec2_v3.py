@@ -20,7 +20,6 @@ from fairseq.modules import (
     Fp32GroupNorm,
     Fp32LayerNorm,
     GradMultiply,
-    GumbelVectorQuantizer,
     LayerNorm,
     MultiheadAttention,
     SamePad,
@@ -121,20 +120,6 @@ class Wav2Vec2V3Model(BaseFairseqModel):
 
         parser.add_argument(
             "--logit-temp", type=float, help="temperature to divide logits by"
-        )
-
-        parser.add_argument(
-            "--quantize-targets", action="store_true", help="use quantized targets"
-        )
-
-        parser.add_argument(
-            "--quantize-input", action="store_true", help="use quantized inputs"
-        )
-
-        parser.add_argument(
-            "--same-quantizer",
-            action="store_true",
-            help="use same quantizer for inputs and targets",
         )
 
         parser.add_argument(
@@ -315,7 +300,7 @@ class Wav2Vec2V3Model(BaseFairseqModel):
 
         self.post_extract_proj = (
             nn.Linear(self.embed, args.encoder_embed_dim)
-            if self.embed != args.encoder_embed_dim and not args.quantize_input
+            if self.embed != args.encoder_embed_dim
             else None
         )
 
@@ -338,51 +323,15 @@ class Wav2Vec2V3Model(BaseFairseqModel):
 
         self.feature_grad_mult = args.feature_grad_mult
 
-        self.quantizer = None
-        self.input_quantizer = None
-
         self.n_negatives = args.num_negatives
         self.cross_sample_negatives = args.cross_sample_negatives
-        self.codebook_negatives = args.codebook_negatives
         self.negatives_from_everywhere = args.negatives_from_everywhere
 
         self.logit_temp = args.logit_temp
 
         final_dim = args.final_dim if args.final_dim > 0 else args.encoder_embed_dim
 
-        if args.quantize_targets:
-            vq_dim = args.latent_dim if args.latent_dim > 0 else final_dim
-            self.quantizer = GumbelVectorQuantizer(
-                dim=self.embed,
-                num_vars=args.latent_vars,
-                temp=eval(args.latent_temp),
-                groups=args.latent_groups,
-                combine_groups=False,
-                vq_dim=vq_dim,
-                time_first=True,
-            )
-            self.project_q = nn.Linear(vq_dim, final_dim)
-        else:
-            self.project_q = nn.Linear(self.embed, final_dim)
-
-        if args.quantize_input:
-            if args.same_quantizer and self.quantizer is not None:
-                vq_dim = final_dim
-                self.input_quantizer = self.quantizer
-            else:
-                vq_dim = (
-                    args.latent_dim if args.latent_dim > 0 else args.encoder_embed_dim
-                )
-                self.input_quantizer = GumbelVectorQuantizer(
-                    dim=self.embed,
-                    num_vars=args.latent_vars,
-                    temp=eval(args.latent_temp),
-                    groups=args.latent_groups,
-                    combine_groups=False,
-                    vq_dim=vq_dim,
-                    time_first=True,
-                )
-            self.project_inp = nn.Linear(vq_dim, args.encoder_embed_dim)
+        self.project_q = nn.Linear(self.embed, final_dim)
 
         self.mask_emb = nn.Parameter(
             torch.FloatTensor(args.encoder_embed_dim).uniform_()
@@ -561,15 +510,6 @@ class Wav2Vec2V3Model(BaseFairseqModel):
         prob_ppl = None
         curr_temp = None
 
-        if self.input_quantizer:
-            q = self.input_quantizer(features, produce_targets=False)
-            features = q["x"]
-            num_vars = q["num_vars"]
-            code_ppl = q["code_perplexity"]
-            prob_ppl = q["prob_perplexity"]
-            curr_temp = q["temp"]
-            features = self.project_inp(features)
-
         if mask:
             x, mask_indices = self.apply_mask(features, padding_mask)
             if mask_indices is not None:
@@ -588,41 +528,13 @@ class Wav2Vec2V3Model(BaseFairseqModel):
         if features_only:
             return {"x": x, "padding_mask": padding_mask}
 
-        if self.quantizer:
-            q = self.quantizer(y, produce_targets=False)
-            y = q["x"]
-            num_vars = q["num_vars"]
-            code_ppl = q["code_perplexity"]
-            prob_ppl = q["prob_perplexity"]
-            curr_temp = q["temp"]
+        y = self.project_q(y)
 
-            y = self.project_q(y)
-
-            if self.negatives_from_everywhere:
-                neg_cands, *_ = self.quantizer(unmasked_features, produce_targets=False)
-                negs, _ = self.sample_negatives(neg_cands, y.size(1))
-                negs = self.project_q(negs)
-
-            else:
-                negs, _ = self.sample_negatives(y, y.size(1))
-
-            if self.codebook_negatives > 0:
-                cb_negs = self.quantizer.sample_from_codebook(
-                    y.size(0) * y.size(1), self.codebook_negatives
-                )
-                cb_negs = cb_negs.view(
-                    self.codebook_negatives, y.size(0), y.size(1), -1
-                )  # order doesnt matter
-                cb_negs = self.project_q(cb_negs)
-                negs = torch.cat([negs, cb_negs], dim=0)
+        if self.negatives_from_everywhere:
+            negs, _ = self.sample_negatives(unmasked_features, y.size(1))
+            negs = self.project_q(negs)
         else:
-            y = self.project_q(y)
-
-            if self.negatives_from_everywhere:
-                negs, _ = self.sample_negatives(unmasked_features, y.size(1))
-                negs = self.project_q(negs)
-            else:
-                negs, _ = self.sample_negatives(y, y.size(1))
+            negs, _ = self.sample_negatives(y, y.size(1))
 
         logits_ali = self.phone_proj(x[mask_indices]) # N, V
         x = x[mask_indices].view(x.size(0), -1, x.size(-1))
@@ -637,20 +549,7 @@ class Wav2Vec2V3Model(BaseFairseqModel):
         result = {"x": x, "padding_mask": padding_mask, "mask_indices": mask_indices,
                   "features_pen": features_pen, "logits_ali": logits_ali}
 
-        if prob_ppl is not None:
-            result["prob_perplexity"] = prob_ppl
-            result["code_perplexity"] = code_ppl
-            result["num_vars"] = num_vars
-            result["temp"] = curr_temp
-
         return result
-
-    def quantize(self, x):
-        assert self.quantizer is not None
-        x = self.feature_extractor(x)
-        x = x.transpose(1, 2)
-        x = self.layer_norm(x)
-        return self.quantizer.forward_idx(x)
 
     def extract_features(self, source, padding_mask, mask=False):
         res = self.forward(source, padding_mask, mask=mask, features_only=True)
@@ -685,19 +584,12 @@ class Wav2Vec2V3Model(BaseFairseqModel):
     def get_extra_losses(self, net_output):
         pen = []
 
-        if "prob_perplexity" in net_output:
-            pen.append(
-                (net_output["num_vars"] - net_output["prob_perplexity"])
-                / net_output["num_vars"]
-            )
-
         if "features_pen" in net_output:
             pen.append(net_output["features_pen"])
 
         return pen
 
     def remove_pretraining_modules(self):
-        self.quantizer = None
         self.project_q = None
         self.target_glu = None
         self.final_proj = None
@@ -1007,10 +899,6 @@ def base_architecture(args):
     args.conv_feature_layers = getattr(args, "conv_feature_layers", conv_feature_layers)
 
     args.logit_temp = getattr(args, "logit_temp", 0.1)
-
-    args.quantize_targets = getattr(args, "quantize_targets", False)
-    args.quantize_input = getattr(args, "quantize_input", False)
-    args.same_quantizer = getattr(args, "same_quantizer", False)
 
     args.feature_grad_mult = getattr(args, "feature_grad_mult", 1.0)
 

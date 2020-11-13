@@ -278,7 +278,7 @@ class Wav2Vec2V1Model(BaseFairseqModel):
 
         self.phone_proj = nn.Linear(args.encoder_embed_dim, len(tgt_dict))
 
-        if getattr(args, "w2v_args", None) is None:
+        if getattr(args, "w2v_path", None):
             print('load Wav2VecEncoder from {}'.format(args.w2v_path))
             state = checkpoint_utils.load_checkpoint_to_cpu(args.w2v_path)
             self.load_state_dict(state["model"], strict=False)

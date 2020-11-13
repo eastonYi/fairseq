@@ -220,7 +220,8 @@ class Wav2VecEncoder(FairseqEncoder):
             w2v_args = state["args"]
             # assert getattr(w2v_args, "w2v_path", None) is None # w2v_path is the pretrain model which should not have w2v_path
             if getattr(w2v_args, "w2v_path", None):
-                w2v_args.w2v_path = '../libri/wav2vec2_small.pt'
+                # w2v_args.w2v_path = '../libri/wav2vec2_small.pt'
+                w2v_args.w2v_path = None
         else:
             state = None
             w2v_args = args.w2v_args
@@ -229,7 +230,7 @@ class Wav2VecEncoder(FairseqEncoder):
 
         w2v_args.data = args.data
 
-        if w2v_args.arch in ('wav2vec2_semi', 'wav2vec2_v1', 'wav2vec2_v2'):
+        if w2v_args.arch in ('wav2vec2_semi', 'wav2vec2_v1', 'wav2vec2_v2', 'wav2vec2_v3'):
             w2v_args.arch = 'wav2vec2'
             w2v_args.task = 'audio_pretraining'
             task = tasks.setup_task(w2v_args)

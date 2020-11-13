@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from typing import List, Tuple
 
-from fairseq import utils
+from fairseq import utils, checkpoint_utils
 from fairseq.data.data_utils import compute_mask_indices
 from fairseq.models import BaseFairseqModel, register_model, register_model_architecture
 from fairseq.modules import (
@@ -36,6 +36,7 @@ class Wav2Vec2Model(BaseFairseqModel):
     def add_args(parser):
         """Add model-specific arguments to the parser."""
 
+        parser.add_argument("--w2v-path", default=None, help="path to wav2vec 2.0 model")
         parser.add_argument(
             "--extractor-mode",
             choices=["default", "layer_norm"],
@@ -398,6 +399,14 @@ class Wav2Vec2Model(BaseFairseqModel):
             )
 
         self.final_proj = nn.Linear(args.encoder_embed_dim, final_dim)
+
+        if getattr(args, "w2v_path", None):
+            print('load Wav2VecEncoder from {}'.format(args.w2v_path))
+            state = checkpoint_utils.load_checkpoint_to_cpu(args.w2v_path)
+            for i in list(state['model'].keys()):
+                if 'quantizer' in i:
+                    state['model'].pop(i)
+            print(self.load_state_dict(state["model"], strict=False))
 
     def upgrade_state_dict_named(self, state_dict, name):
         super().upgrade_state_dict_named(state_dict, name)

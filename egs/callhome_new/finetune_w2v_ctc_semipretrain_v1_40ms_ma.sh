@@ -1,11 +1,8 @@
 gpu=$1
-# SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_en
-# W2V_PATH=../libri/exp/semi_pretrain_v1_40ms_960h_4/checkpoint_best.pt
-SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_en_v2
-# W2V_PATH=../libri/exp/continue_pretrain_40ms_960h/checkpoint_best.pt
-W2V_PATH=../libri/exp/continue_pretrain_40ms_960h_v2/checkpoint_best.pt
-DATA_DIR=data/en/subword
-label_type=subword
+SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_ma_v2
+W2V_PATH=../libri/exp/semi_pretrain_v1_40ms_960h_4/checkpoint_best.pt
+DATA_DIR=data/ma/hkust_style_char
+label_type=char
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --train-subset train --valid-subset dev --criterion ctc --best-checkpoint-metric uer \

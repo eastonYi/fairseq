@@ -1,8 +1,8 @@
 gpu=$1
-# SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_20ms_ma
-# W2V_PATH=../libri/exp/semi_pretrain_v1_20ms_960h/checkpoint_best.pt
-SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_addhkust_ma_3
-W2V_PATH=../hkust/exp/semi_pretrain_v1/checkpoint_best.pt
+SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_20ms_ma_2
+W2V_PATH=../libri/wav2vec2_semi_pretrain_v1_20ms_960h_7.pt
+# SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v3_ma
+# W2V_PATH=../libri/exp/semi_pretrain-v3_20ms_960h/checkpoint_last.pt
 DATA_DIR=data/ma/hkust_style_char
 label_type=char
 
@@ -16,7 +16,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --feature-grad-mult 0.0 --freeze-finetune-updates 1000 --validate-after-updates 5000 \
 --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-08 \
 --no-epoch-checkpoints \
---lr 4e-05 --lr-scheduler tri_stage --warmup-steps 8000 --hold-steps 42000 --decay-steps 50000 \
+--lr 2e-05 --lr-scheduler tri_stage --warmup-steps 8000 --hold-steps 42000 --decay-steps 50000 \
 --final-lr-scale 0.05 --final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \
 --attention-dropout 0.0 --max-tokens 1000000 --seed 2337 --ddp-backend no_c10d \
---update-freq 1 --log-interval 100 --validate-interval 1 --log-format simple --save-interval 1
+--update-freq 1 --log-interval 200 --validate-interval 1 --log-format simple --save-interval 1
