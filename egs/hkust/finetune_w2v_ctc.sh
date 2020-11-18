@@ -6,7 +6,7 @@ DATA_DIR=data
 label_type=char
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
---train-subset train --valid-subset valid --criterion ctc --best-checkpoint-metric uer \
+--train-subset train --valid-subset test --criterion ctc --best-checkpoint-metric uer \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR --post-process $label_type \
 --num-workers 4 --max-update 80000 --task audio_ctc --arch wav2vec_ctc \
 --w2v-path $W2V_PATH --labels $label_type --apply-mask --mask-selection static --mask-other 0 \

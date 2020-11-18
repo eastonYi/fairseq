@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fairseq import utils
+from fairseq import utils, checkpoint_utils, tasks
 from fairseq.models import (
     FairseqEncoderModel,
     FairseqEncoder,
@@ -108,7 +108,7 @@ class MaskedLMModel(FairseqEncoderModel):
         return self.encoder.max_positions
 
     @classmethod
-    def build_model(cls, args, task):
+    def build_model(cls, args, task, dictionary=None):
         """Build a new model instance."""
         # make sure all arguments are present in older models
         base_architecture(args)
@@ -118,9 +118,36 @@ class MaskedLMModel(FairseqEncoderModel):
 
         logger.info(args)
 
-        encoder = MaskedLMEncoder(args, task.dictionary)
+        if task is None:
+            assert dictionary
+            encoder = MaskedLMEncoder(args, dictionary)
+        else:
+            encoder = MaskedLMEncoder(args, task.dictionary)
+
+        if getattr(args, "lm_path", None):
+            print('load masked_lm from {}'.format(args.lm_path))
+            state = checkpoint_utils.load_checkpoint_to_cpu(args.lm_path)
+            lm_args = state["args"]
+            lm_args.data = args.data
+            assert getattr(lm_args, "lm_path", None) is None
+            lm_args.use_internal_embedding = False
+            task = tasks.setup_task(lm_args)
+            encoder = task.build_model(lm_args)
+            print('restore masked_lm from {}'.format(args.lm_path))
+            encoder.load_state_dict(state["model"], strict=False)
+
         return cls(args, encoder)
 
+    def get_normalized_probs(self, net_output, log_probs):
+        """Get normalized probabilities (or log probs) from a net's output."""
+        logits = net_output[0]
+        if log_probs:
+            res = utils.log_softmax(logits.float(), dim=-1)
+        else:
+            res = utils.softmax(logits.float(), dim=-1)
+        res.batch_first = True
+
+        return res
 
 class MaskedLMEncoder(FairseqEncoder):
     """
@@ -146,6 +173,7 @@ class MaskedLMEncoder(FairseqEncoder):
             activation_dropout=args.act_dropout,
             max_seq_len=self.max_positions,
             num_segments=args.num_segment,
+            use_internal_embedding=args.use_internal_embedding,
             use_position_embeddings=not args.no_token_positional_embeddings,
             encoder_normalize_before=args.encoder_normalize_before,
             apply_bert_init=args.apply_bert_init,
@@ -280,6 +308,7 @@ def base_architecture(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
     args.share_encoder_input_output_embed = getattr(args, 'share_encoder_input_output_embed', False)
     args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
+    args.use_internal_embedding = getattr(args, 'use_internal_embedding', True)
     args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
     args.num_segment = getattr(args, 'num_segment', 2)
 

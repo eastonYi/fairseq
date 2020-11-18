@@ -14,6 +14,7 @@ from fairseq import utils
 from fairseq.models import (
     FairseqEncoder,
     FairseqDecoder,
+    BaseFairseqModel,
     FairseqIncrementalDecoder,
     FairseqEncoderDecoderModel,
     register_model,
@@ -36,6 +37,7 @@ from .wav2vec2_seq2seq import (
     build_embedding,
     Wav2VecEncoder,
     Linear,
+    Assigner,
     cif_architecture,
     add_decoder_args
 )
@@ -561,6 +563,114 @@ class W2V_MIX_CIF_LM_RNN(W2V_MIX_CIF_RNN_LM):
         return logits
 
 
+@register_model("wav2vec_cif_bert")
+class W2V_MIX_CIF_BERT(BaseFairseqModel):
+
+    def __init__(self, args, encoder, assigner, lm):
+        super().__init__()
+        self.encoder = encoder
+        self.assigner = assigner
+        self.lm = lm
+        self.num_updates = 0
+        self.args = args
+        self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
+        self.proj = Linear(encoder.d, lm.encoder.encoder.sentence_encoder.embedding_dim)
+        # self.proj = Linear(encoder.d, lm.encoder.encoder.sentence_encoder.vocab_size)
+
+    @staticmethod
+    def add_args(parser):
+        add_common_args(parser)
+        parser.add_argument(
+            "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
+        )
+        parser.add_argument(
+            "--lm-path", type=str, help="dim-hidden-mixer"
+        )
+        parser.add_argument(
+            "--assigner-conv-layers",
+            type=str,
+            metavar="EXPR",
+            help="convolutional feature extraction layers [(dim, kernel_size, stride), ...]",
+        )
+        parser.add_argument("--lambda-qua", type=float, metavar="D", help="lambda-qua")
+        parser.add_argument("--lambda-cp", type=float, metavar="D", help="lambda-cp")
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+        # make sure all arguments are present in older models
+        w2v_cif_bert_architecture(args)
+
+        if not hasattr(args, "max_source_positions"):
+            args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
+
+        lm = cls.build_lm(args, task.dictionary)
+        encoder = cls.build_encoder(args) # encoder
+        assigner = cls.build_assigner(args, encoder.d)
+
+        return cls(args, encoder, assigner, lm)
+
+    @classmethod
+    def build_encoder(cls, args, tgt_dict=None):
+        return Wav2VecEncoder(args, tgt_dict=tgt_dict)
+
+    @classmethod
+    def build_assigner(cls, args, dim_input):
+        return Assigner(args, dim_input)
+
+    @staticmethod
+    def resize(*args, **kwargs):
+        return CIFModel.resize(*args, **kwargs)
+
+    @staticmethod
+    def cif(*args, **kwargs):
+        return CIFModel.cif(*args, **kwargs)
+
+    @classmethod
+    def build_lm(cls, args, dictionary):
+        from fairseq.models.masked_lm import MaskedLMModel as LM
+        args.tokens_per_sample = 50
+        return LM.build_model(args, task=None, dictionary=dictionary)
+
+    def forward(self, **kwargs):
+        """
+        encoder_output= "encoder_out": x,
+                        "encoded": encoded,
+                        "encoder_padding_mask": padding_mask,  # B x T
+                        "padding_mask": padding_mask,
+        """
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        alphas = self.assigner(encoder_output)
+        _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
+        cif_outputs = self.cif(encoder_output, _alphas)
+        hidden = self.proj(cif_outputs)
+        # logits = self.proj(cif_outputs)
+
+        ft = self.freeze_lm_finetune_updates <= self.num_updates
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            logits = self.lm(hidden)[0]
+            # try:
+            #     logits = self.lm(cif_outputs)[0]
+            # except:
+            #     import pdb; pdb.set_trace()
+
+        return {'logits': logits, 'len_logits': kwargs['target_lengths'],
+                'alphas': alphas, 'num_output': num_output}
+
+    def get_normalized_probs(self, net_output, log_probs):
+        """Get normalized probabilities (or log probs) from a net's output."""
+        logits = net_output["logits"]
+        if log_probs:
+            res = utils.log_softmax(logits.float(), dim=-1)
+        else:
+            res = utils.softmax(logits.float(), dim=-1)
+        res.batch_first = True
+
+        return res
+
+
 from fairseq.models.lstm import LSTMCell
 class LSTM_MIXER(LSTMDecoder):
     """LSTM decoder."""
@@ -693,3 +803,7 @@ def w2v_cif_rnn_lm_architecture(args):
 @register_model_architecture("wav2vec_cif_lm_rnn", "wav2vec_cif_lm_rnn")
 def w2v_cif_lm_rnn_architecture(args):
     w2v_cif_lm_architecture(args)
+
+@register_model_architecture("wav2vec_cif_bert", "wav2vec_cif_bert")
+def w2v_cif_bert_architecture(args):
+    w2v_lm_architecture(args)

@@ -84,6 +84,7 @@ class TransformerSentenceEncoder(nn.Module):
         layerdrop: float = 0.0,
         max_seq_len: int = 256,
         num_segments: int = 2,
+        use_internal_embedding: bool = True, # if false, the input to the mdoel is alreadly embedded
         use_position_embeddings: bool = True,
         offset_positions_by_padding: bool = True,
         encoder_normalize_before: bool = False,
@@ -107,15 +108,17 @@ class TransformerSentenceEncoder(nn.Module):
         self.max_seq_len = max_seq_len
         self.embedding_dim = embedding_dim
         self.num_segments = num_segments
+        self.use_internal_embedding = use_internal_embedding
         self.use_position_embeddings = use_position_embeddings
         self.apply_bert_init = apply_bert_init
         self.learned_pos_embedding = learned_pos_embedding
         self.traceable = traceable
         self.tpu = False  # whether we're on TPU
 
-        self.embed_tokens = self.build_embedding(
-            self.vocab_size, self.embedding_dim, self.padding_idx
-        )
+        if use_internal_embedding:
+            self.embed_tokens = self.build_embedding(
+                self.vocab_size, self.embedding_dim, self.padding_idx
+            )
         self.embed_scale = embed_scale
 
         if q_noise > 0:
@@ -232,13 +235,21 @@ class TransformerSentenceEncoder(nn.Module):
         if not self.traceable and not self.tpu and not padding_mask.any():
             padding_mask = None
 
-        x = self.embed_tokens(tokens)
+        if self.use_internal_embedding:
+            x = self.embed_tokens(tokens)
+            if self.embed_scale is not None:
+                x *= self.embed_scale
 
-        if self.embed_scale is not None:
-            x *= self.embed_scale
+            if self.embed_positions is not None:
+                x += self.embed_positions(tokens, positions=positions)
+        else:
+            assert tokens.dim() == 3
+            x = tokens
+            if self.embed_scale is not None:
+                x *= self.embed_scale
 
-        if self.embed_positions is not None:
-            x += self.embed_positions(tokens, positions=positions)
+            if self.embed_positions is not None:
+                x += self.embed_positions(torch.ones([x.size(0), x.size(1)]).to(x.device), positions=positions)
 
         if self.segment_embeddings is not None and segment_labels is not None:
             x += self.segment_embeddings(segment_labels)

@@ -451,8 +451,12 @@ class CIFModel(TransformerModel):
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
                 'alphas': alphas, 'num_output': num_output}
 
-    def cif(self, encoder_output, alphas, threshold=0.9, log=False):
-        hidden = encoder_output['encoder_out']
+    @staticmethod
+    def cif(encoder_output, alphas, threshold=0.9, log=False):
+        if 'encoded' in encoder_output.keys():
+            hidden = encoder_output['encoded']
+        else:
+            hidden = encoder_output['encoder_out']
         device = hidden.device
         B, T, H = hidden.size()
 
@@ -1051,7 +1055,10 @@ class Assigner(FairseqEncoder):
         Returns:
             the decoder's output of shape `(batch, src_len)`
         """
-        encoded, padding_mask = encoder_output['encoder_out'], encoder_output['padding_mask']
+        if 'encoded' in encoder_output.keys():
+            encoded, padding_mask = encoder_output['encoded'], encoder_output['padding_mask']
+        else:
+            encoded, padding_mask = encoder_output['encoder_out'], encoder_output['padding_mask']
 
         x = self.feature_extractor(encoded)
         x = self.proj(x)[:, :, 0]

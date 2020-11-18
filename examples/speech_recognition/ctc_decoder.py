@@ -42,7 +42,6 @@ class CTCDecoder(object):
 
     def get_emissions(self, models, encoder_input):
         """Run encoder and normalize emissions"""
-        # encoder_out = models[0].encoder(**encoder_input)
         encoder_out = models[0](**encoder_input)
         emissions = models[0].get_normalized_probs(encoder_out, log_probs=False)
         seq_lens = (~encoder_out['encoder_padding_mask']).sum(-1)

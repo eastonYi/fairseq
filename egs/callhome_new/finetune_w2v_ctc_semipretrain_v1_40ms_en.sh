@@ -1,9 +1,10 @@
 gpu=$1
 # SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_en
 # W2V_PATH=../libri/exp/semi_pretrain_v1_40ms_960h_4/checkpoint_best.pt
-SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_en_v2
+SAVE_DIR=exp/finetune_w2v_ctc_semipretrain_v1_40ms_en_2
 # W2V_PATH=../libri/exp/continue_pretrain_40ms_960h/checkpoint_best.pt
-W2V_PATH=../libri/exp/continue_pretrain_40ms_960h_v2/checkpoint_best.pt
+# W2V_PATH=../libri/exp/continue_pretrain_40ms_960h_v2/checkpoint_best.pt
+W2V_PATH=../libri/wav2vec2_semi_pretrain_v1_40ms_960h_2.pt
 DATA_DIR=data/en/subword
 label_type=subword
 

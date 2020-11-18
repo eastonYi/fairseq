@@ -507,7 +507,7 @@ class FairseqEncoderModel(BaseFairseqModel):
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
-        assert isinstance(self.encoder, FairseqEncoder)
+        # assert isinstance(self.encoder, FairseqEncoder)
 
     def forward(self, src_tokens, src_lengths, **kwargs):
         """
