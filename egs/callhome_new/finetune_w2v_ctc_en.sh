@@ -1,5 +1,5 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_ctc_en
+SAVE_DIR=exp/finetune_w2v_ctc_en_2
 W2V_PATH=../libri/wav2vec2_small.pt
 DATA_DIR=data/en/subword
 label_type=subword

@@ -45,7 +45,7 @@ class CIFDecoder(Seq2seqDecoder):
             "encoder_out": encoder_output.encoder_out.transpose(0,1), # B x T x C
             "padding_mask": encoder_output.encoder_padding_mask
         }
-        alphas = models[0].assigner(encoder_out)
+        alphas, _ = models[0].assigner(encoder_out)
         # _alphas, num_output = self.resize(alphas, kwargs['target_lengths'], at_least_one=True)
         cif_outputs = models[0].cif(encoder_out, alphas)
         src_lengths = torch.round(alphas.sum(-1)).int()
@@ -87,7 +87,7 @@ class CIFDecoder(Seq2seqDecoder):
 
         return hypos
 
-    def greedy_decode(self, encoder_output):
+    def greedy_decode(self, encoder_output, max_decode_len=None):
         hypos = []
 
         results, out_seq_len, scores = self.batch_greedy_decode(

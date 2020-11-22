@@ -92,11 +92,9 @@ class CrossEntropyWithAccCriterion(FairseqCriterion):
         """
         # decoder_out = model(**sample["net_input"])
         encoder_output = model.get_encoder_output(sample["net_input"])
-        input_lengths = (~encoder_output.encoder_padding_mask).sum(-1)
         decoder_out = model.decoder(
             prev_output_tokens=sample["net_input"]["prev_output_tokens"],
-            encoder_out=encoder_output,
-            src_lengths=input_lengths
+            encoder_out=encoder_output
         )
         target = sample["target"]
         lprobs, loss = self.compute_loss(
@@ -241,29 +239,10 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
     def forward(self, model, sample, reduction="sum", log_probs=True):
         encoder_output = model.get_encoder_output(sample["net_input"])
 
-        p = max((model.num_updates - model.teacher_forcing_updates) / 2000.0, 0.0)
-        if model.num_updates <= model.teacher_forcing_updates:
-            decoder_out = model.decoder(
-                prev_output_tokens=sample["net_input"]["prev_output_tokens"],
-                encoder_out=encoder_output
-            )
-        else:
-            with torch.no_grad():
-                decoder_out = model.decoder(
-                    prev_output_tokens=sample["net_input"]["prev_output_tokens"],
-                    encoder_out=encoder_output)
-                decoded = decoder_out["logits"].argmax(-1).int()
-                device = decoded.device
-                prev_self_deocded = torch.cat([
-                    torch.ones([decoded.size(0), 1]).int().to(device) * self.task.target_dictionary.eos(),
-                    decoded[:, :-1]], 1)
-                prev_output = torch.where(
-                    (torch.rand(decoded.size()) > p).to(device),
-                    sample["net_input"]["prev_output_tokens"],
-                    prev_self_deocded)
-            decoder_out = model.decoder(
-                prev_output_tokens=prev_output,
-                encoder_out=encoder_output)
+        decoder_out = model.decoder(
+            prev_output_tokens=sample["net_input"]["prev_output_tokens"],
+            encoder_out=encoder_output
+        )
 
         target = sample["target"]
         lprobs, loss = self.compute_loss(
@@ -272,7 +251,6 @@ class CrossEntropyWithAccV2Criterion(FairseqCriterion):
         sample_size, logging_output = self.get_logging_output(
             sample, target, lprobs, loss
         )
-        logging_output['schedule_sampling'] = p
 
         if not model.training:
             import editdistance

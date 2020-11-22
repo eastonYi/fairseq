@@ -45,14 +45,13 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
         return decoder
 
     def compute_loss(self, model, net_output, sample, reduction, log_probs):
+        # number loss
         _number = net_output["num_output"]
         number = sample["target_lengths"].float()
-        alphas = net_output["alphas"]
-        tmp = torch.where(alphas < 1e-5, torch.ones_like(alphas) * 1e-5, alphas)
-        cp_loss = (alphas * torch.log(tmp)).sum() / number.sum()
-        diff = torch.sqrt(torch.pow(_number - number, 2))
-        qua_loss = torch.where(diff < 1e-3, torch.zeros_like(diff), diff).sum() + \
-                   self.args.lambda_cp * cp_loss
+        diff = torch.sqrt(torch.pow(_number - number, 2)).sum()
+        # alphas_pen
+        alphas_pen = net_output["alphas_pen"]
+        qua_loss = diff +  self.args.lambda_alpha * alphas_pen
         target = sample["target"] # no eos bos
         # N, T -> N * T
         target = target.view(-1)
@@ -214,14 +213,13 @@ class QuantityCrossEntropyWithAccCriterionV2(LabelSmoothedCrossEntropyWithAccCri
         return cls(args, task)
 
     def compute_loss(self, model, net_output, sample, reduction, log_probs):
+        # number loss
         _number = net_output["num_output"]
         number = sample["target_lengths"].float()
-        alphas = net_output["alphas"]
-        tmp = torch.where(alphas < 1e-5, torch.ones_like(alphas) * 1e-5, alphas)
-        cp_loss = (alphas * torch.log(tmp)).sum() / number.sum()
-        diff = torch.sqrt(torch.pow(_number - number, 2))
-        qua_loss = torch.where(diff < 1e-3, torch.zeros_like(diff), diff).sum() + \
-                   self.args.lambda_cp * cp_loss
+        diff = torch.sqrt(torch.pow(_number - number, 2)).sum()
+        # alphas_pen
+        alphas_pen = net_output["alphas_pen"]
+        qua_loss = diff +  self.args.lambda_alpha * alphas_pen
         target = sample["target"] # no eos bos
         # N, T -> N * T
         target = target.view(-1)
@@ -243,10 +241,6 @@ class QuantityCrossEntropyWithAccCriterionV2(LabelSmoothedCrossEntropyWithAccCri
         ce_loss, _ = label_smoothed_nll_loss(
             lprobs, target.long(), 0.1, ignore_index=self.padding_idx, reduce=reduction,
         )
-
-        if torch.isnan(qua_loss.sum() + ce_loss.sum() + lprobs.sum()):
-            import pdb; pdb.set_trace()
-            print('here')
 
         return lprobs, qua_loss, ce_loss
 

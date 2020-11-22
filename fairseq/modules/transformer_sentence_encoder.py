@@ -236,6 +236,11 @@ class TransformerSentenceEncoder(nn.Module):
             padding_mask = None
 
         if self.use_internal_embedding:
+            # compute padding mask. This is needed for multi-head attention
+            padding_mask = tokens.eq(self.padding_idx)
+            if not self.traceable and not self.tpu and not padding_mask.any():
+                padding_mask = None
+
             x = self.embed_tokens(tokens)
             if self.embed_scale is not None:
                 x *= self.embed_scale
@@ -253,6 +258,56 @@ class TransformerSentenceEncoder(nn.Module):
 
         if self.segment_embeddings is not None and segment_labels is not None:
             x += self.segment_embeddings(segment_labels)
+
+        if self.quant_noise is not None:
+            x = self.quant_noise(x)
+
+        if self.emb_layer_norm is not None:
+            x = self.emb_layer_norm(x)
+
+        x = self.dropout_module(x)
+
+        # account for padding while computing the representation
+        if padding_mask is not None:
+            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        inner_states = []
+        if not last_state_only:
+            inner_states.append(x)
+
+        for layer in self.layers:
+            x, _ = layer(x, self_attn_padding_mask=padding_mask)
+            if not last_state_only:
+                inner_states.append(x)
+
+        sentence_rep = x[0, :, :]
+
+        if last_state_only:
+            inner_states = [x]
+
+        if self.traceable:
+            return torch.stack(inner_states), sentence_rep
+        else:
+            return inner_states, sentence_rep
+
+    def forward_embeded(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor,
+        last_state_only: bool = False,
+        positions: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        assert x.dim() == 3
+
+        if self.embed_scale is not None:
+            x *= self.embed_scale
+
+        if self.embed_positions is not None:
+            x += self.embed_positions(torch.ones([x.size(0), x.size(1)]).to(x.device), positions=positions)
 
         if self.quant_noise is not None:
             x = self.quant_noise(x)

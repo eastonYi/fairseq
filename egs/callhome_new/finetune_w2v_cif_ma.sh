@@ -1,12 +1,12 @@
 gpu=$1
-SAVE_DIR=exp/finetune_w2v_cif
+SAVE_DIR=exp/finetune_w2v_cif_ma
 W2V_PATH=../libri/wav2vec2_small.pt
-DATA_DIR=data
+DATA_DIR=data/ma/hkust_style_char
 label_type=char
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR \
---train-subset train --valid-subset valid --no-epoch-checkpoints  \
+--train-subset train --valid-subset dev --no-epoch-checkpoints  \
 --labels $label_type --num-workers 8 --max-update 80000 \
 --arch wav2vec_cif --task audio_cif --criterion qua_ce_acc --best-checkpoint-metric uer \
 --w2v-path $W2V_PATH \
@@ -18,6 +18,6 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --validate-after-updates 1  --validate-interval 1 --decoder cif_decoder \
 --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-08 --lr 4e-05 --lr-scheduler tri_stage \
 --warmup-steps 5000 --hold-steps 20000 --decay-steps 30000 --final-lr-scale 0.05 \
---final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \
---attention-dropout 0.0 --max-tokens 1200000 --seed 2337 --ddp-backend no_c10d --update-freq 2 \
---log-interval 500 --log-format simple --save-interval 1
+--final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 --decoder-dropout 0.5 \
+--attention-dropout 0.0 --max-tokens 1000000 --seed 2337 --ddp-backend no_c10d --update-freq 1 \
+--log-interval 200 --log-format simple --save-interval 1

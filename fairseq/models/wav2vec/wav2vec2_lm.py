@@ -593,7 +593,7 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
             help="convolutional feature extraction layers [(dim, kernel_size, stride), ...]",
         )
         parser.add_argument("--lambda-qua", type=float, metavar="D", help="lambda-qua")
-        parser.add_argument("--lambda-cp", type=float, metavar="D", help="lambda-cp")
+        parser.add_argument("--lambda-alpha", type=float, metavar="D", help="lambda-alpha")
 
     @classmethod
     def build_model(cls, args, task):
@@ -631,7 +631,7 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
     @classmethod
     def build_lm(cls, args, dictionary):
         from fairseq.models.masked_lm import MaskedLMModel as LM
-        args.tokens_per_sample = 50
+        args.tokens_per_sample = 100
         return LM.build_model(args, task=None, dictionary=dictionary)
 
     def forward(self, **kwargs):
@@ -642,22 +642,19 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
                         "padding_mask": padding_mask,
         """
         encoder_output = self.encoder(tbc=False, **kwargs)
-        alphas = self.assigner(encoder_output)
+        alphas, alphas_pen = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         cif_outputs = self.cif(encoder_output, _alphas)
         hidden = self.proj(cif_outputs)
+        padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
         # logits = self.proj(cif_outputs)
 
-        ft = self.freeze_lm_finetune_updates <= self.num_updates
-        with torch.no_grad() if not ft else contextlib.ExitStack():
-            logits = self.lm(hidden)[0]
-            # try:
-            #     logits = self.lm(cif_outputs)[0]
-            # except:
-            #     import pdb; pdb.set_trace()
+        # ft = self.freeze_lm_finetune_updates <= self.num_updates
+        # with torch.no_grad() if not ft else contextlib.ExitStack():
+        logits = self.lm.forward_embeded(hidden, padding_mask)
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
-                'alphas': alphas, 'num_output': num_output}
+                'alphas': alphas, 'num_output': num_output, 'alphas_pen': alphas_pen}
 
     def get_normalized_probs(self, net_output, log_probs):
         """Get normalized probabilities (or log probs) from a net's output."""

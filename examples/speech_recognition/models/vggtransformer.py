@@ -19,6 +19,7 @@ from fairseq.models import (
     register_model_architecture,
 )
 from fairseq.modules import LinearizedConvolution
+from fairseq.models.fairseq_encoder import EncoderOut
 from examples.speech_recognition.data.data_utils import lengths_to_encoder_padding_mask
 from fairseq.modules import TransformerDecoderLayer, TransformerEncoderLayer, VGGBlock
 
@@ -145,6 +146,13 @@ class VGGTransformerModel(FairseqEncoderDecoderModel):
         encoder = cls.build_encoder(args, task)
         decoder = cls.build_decoder(args, task)
         return cls(encoder, decoder)
+
+    def get_encoder_output(self, net_input):
+        feature = net_input["src_tokens"]
+        feature_lengths = net_input["src_lengths"]
+        encoder_output = self.encoder(feature, src_lengths=feature_lengths)
+
+        return encoder_output
 
     def get_normalized_probs(self, net_output, log_probs, sample=None):
         # net_output['encoder_out'] is a (B, T, D) tensor
@@ -343,8 +351,9 @@ class VGGTransformerEncoder(FairseqEncoder):
         encoder_padding_mask, _ = lengths_to_encoder_padding_mask(
             input_lengths, batch_first=True
         )
-        if not encoder_padding_mask.any():
-            encoder_padding_mask = None
+        # import pdb; pdb.set_trace()
+        # if not encoder_padding_mask.any():
+        #     encoder_padding_mask = None
 
         attn_mask = self.lengths_to_attn_mask(input_lengths, subsampling_factor)
 
@@ -370,14 +379,21 @@ class VGGTransformerEncoder(FairseqEncoder):
 
         # encoder_padding_maks is a (T x B) tensor, its [t, b] elements indicate
         # whether encoder_output[t, b] is valid or not (valid=0, invalid=1)
-
-        return {
-            "encoder_out": x,  # (T, B, C)
-            "encoder_padding_mask": encoder_padding_mask.t()
-            if encoder_padding_mask is not None
-            else None,
-            # (B, T) --> (T, B)
-        }
+        return EncoderOut(
+            encoder_out=x,  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=encoder_padding_mask,  # B x T
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+        # return {
+        #     "encoder_out": x,  # (T, B, C)
+        #     "encoder_padding_mask": encoder_padding_mask.t()
+        #     if encoder_padding_mask is not None
+        #     else None,
+        #     # (B, T) --> (T, B)
+        # }
 
     def infer_conv_output_dim(self, in_channels, input_dim):
         sample_seq_len = 200
@@ -539,13 +555,11 @@ class VGGTransformerEncoder(FairseqEncoder):
         return attn_mask.to(input_lengths.device)
 
     def reorder_encoder_out(self, encoder_out, new_order):
-        encoder_out["encoder_out"] = encoder_out["encoder_out"].index_select(
+        encoder_out.encoder_out = encoder_out.encoder_out.index_select(
             1, new_order
         )
-        if encoder_out["encoder_padding_mask"] is not None:
-            encoder_out["encoder_padding_mask"] = encoder_out[
-                "encoder_padding_mask"
-            ].index_select(1, new_order)
+        if encoder_out.encoder_padding_mask is not None:
+            encoder_out.encoder_padding_mask = encoder_out.encoder_padding_mask.index_select(0, new_order)
         return encoder_out
 
 
@@ -658,10 +672,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if isinstance(layer, TransformerDecoderLayer):
                 x, *_ = layer(
                     x,
-                    (encoder_out["encoder_out"] if encoder_out is not None else None),
+                    (encoder_out.encoder_out if encoder_out is not None else None),
                     (
-                        encoder_out["encoder_padding_mask"].t()
-                        if encoder_out["encoder_padding_mask"] is not None
+                        encoder_out.encoder_padding_mask
+                        if encoder_out.encoder_padding_mask is not None
                         else None
                     ),
                     incremental_state,
@@ -836,10 +850,19 @@ class VGGTransformerEncoderOnly(VGGTransformerEncoder):
         # x = F.log_softmax(x, dim=-1)
         # Note: no need this line, because model.get_normalized_prob will call
         # log_softmax
-        return {
-            "encoder_out": x,  # (T, B, C)
-            "encoder_padding_mask": enc_out["encoder_padding_mask"],  # (T, B)
-        }
+
+        return EncoderOut(
+            encoder_out=x,  # T x B x C
+            encoder_embedding=None,
+            encoder_padding_mask=enc_out["encoder_padding_mask"],  # B x T
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+        # return {
+        #     "encoder_out": x,  # (T, B, C)
+        #     "encoder_padding_mask": enc_out["encoder_padding_mask"],  # (T, B)
+        # }
 
     def max_positions(self):
         """Maximum input length supported by the encoder."""

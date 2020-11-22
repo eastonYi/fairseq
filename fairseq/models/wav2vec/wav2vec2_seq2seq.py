@@ -31,12 +31,13 @@ from fairseq.modules import (
     Fp32GroupNorm
 )
 
+from .wav2vec2 import conv_1d_block
 from .wav2vec2_ctc import add_common_args, Wav2VecEncoder, Linear, base_architecture
 
 PAD_IDX = 1
 EOS_IDX = 2
 eps = 1e-7
-
+THRESHOLD = 0.9
 
 def build_embedding(dictionary, embed_dim):
     num_embeddings = len(dictionary)
@@ -118,8 +119,6 @@ def add_decoder_args(parser):
 class TransformerModel(FairseqEncoderDecoderModel):
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
-        self.num_updates = 0
-        self.teacher_forcing_updates = args.teacher_forcing_updates
 
     @staticmethod
     def add_args(parser):
@@ -161,15 +160,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
 
     def forward(self, **kwargs):
         encoder_out = self.encoder(tbc=False, **kwargs)
-        # decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
-        if self.num_updates <= self.teacher_forcing_updates:
-            decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
-        else:
-            with torch.no_grad():
-                decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
-                decoded = decoder_out[0].argmax(-1)
-            encoder_out.prev_output_tokens = decoded
-            decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
+        decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
 
         return decoder_out
 
@@ -397,7 +388,7 @@ class CIFModel(TransformerModel):
             help="convolutional feature extraction layers [(dim, kernel_size, stride), ...]",
         )
         parser.add_argument("--lambda-qua", type=float, metavar="D", help="lambda-qua")
-        parser.add_argument("--lambda-cp", type=float, metavar="D", help="lambda-cp")
+        parser.add_argument("--lambda-alpha", type=float, metavar="D", help="lambda-alpha")
 
     @classmethod
     def build_model(cls, args, task):
@@ -416,7 +407,6 @@ class CIFModel(TransformerModel):
 
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
-        # decoder = cls.build_decoder(args, tgt_dict, encoder.d)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
 
         return cls(args, encoder, assigner, decoder)
@@ -425,31 +415,27 @@ class CIFModel(TransformerModel):
     def build_assigner(cls, args, dim_input):
         return Assigner(args, dim_input)
 
-    # @classmethod
-    # def build_decoder(cls, args, tgt_dict, input_dim):
-        # return FCDecoder(args, tgt_dict, input_dim)
-
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
         return TransformerDecoder(args, tgt_dict, embed_tokens)
 
     def forward(self, **kwargs):
         encoder_output = self.encoder(tbc=False, **kwargs)
-        alphas = self.assigner(encoder_output)
+        alphas, alphas_pen = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         cif_outputs = self.cif(encoder_output, _alphas)
 
         if self.training and cif_outputs.abs().sum(-1).ne(0).sum() != kwargs['target_lengths'].sum():
+            print('_alphas:\t', _alphas.sum(-1))
+            print('alphas:\t', alphas.sum(-1))
+            print('target:\t', kwargs['target_lengths'])
             import pdb; pdb.set_trace()
 
-        if self.num_updates <= self.teacher_forcing_updates:
-            logits = self.decode(encoded_shrunk=cif_outputs,
-                                 prev_output_tokens=kwargs["prev_output_tokens"])
-        else:
-            logits = self.decode(encoded_shrunk=cif_outputs)
+        logits = self.decode(encoded_shrunk=cif_outputs,
+                             prev_output_tokens=kwargs["prev_output_tokens"])
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
-                'alphas': alphas, 'num_output': num_output}
+                'alphas': alphas, 'num_output': num_output, 'alphas_pen': alphas_pen}
 
     @staticmethod
     def cif(encoder_output, alphas, threshold=0.9, log=False):
@@ -510,9 +496,9 @@ class CIFModel(TransformerModel):
         return torch.stack(list_ls, 0)
 
     @staticmethod
-    def resize(alphas, target_lengths, noise=0.095, threshold=0.9):
+    def resize(alphas, target_lengths, noise=0.4, threshold=0.9):
         """
-        alpha in thresh=0.9 | (0.91, noise-0.09)
+        alpha in thresh=0.9 | (-0.095, +0.41)
         """
         device = alphas.device
         # sum
@@ -520,15 +506,17 @@ class CIFModel(TransformerModel):
 
         # scaling
         num = target_lengths.float()
-        num_noise = num + 2 * noise * torch.rand(alphas.size(0)).to(device) - noise
+        num_noise = num + (noise + 0.105) * torch.rand(alphas.size(0)).to(device) - 0.095
+        # num_noise = num + 2 * noise * torch.rand(alphas.size(0)).to(device) - noise
         if (torch.round(num) < 1).float().sum() > 0 or \
            (torch.round(num_noise) < 1).float().sum() > 0:
             import pdb; pdb.set_trace()
         _alphas = alphas * (num_noise / _num)[:, None].repeat(1, alphas.size(1))
 
         # rm attention value that exceeds threashold
-        while len(torch.where(_alphas >= threshold)[0]):
-            xs, ys = torch.where(_alphas >= threshold)
+        while len(torch.where(_alphas > threshold)[0]):
+            print('fixing alpha')
+            xs, ys = torch.where(_alphas > threshold)
             for x, y in zip(xs, ys):
                 if _alphas[x][y] >= threshold:
                     mask = _alphas[x].ne(0).float()
@@ -788,7 +776,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         attn = None
 
         inner_states = [x]
-
         # decoder layers
         for layer in self.layers:
             dropout_probability = np.random.random()
@@ -1035,7 +1022,7 @@ class Assigner(FairseqEncoder):
         super().__init__()
         assigner_conv_layers = eval(args.assigner_conv_layers)
         self.embed = assigner_conv_layers[-1][0]
-        self.feature_extractor = Conv2DFeatureExtractionModel(
+        self.feature_extractor = Conv1DFeatureExtractionModel(
             dim_input=dim_input,
             conv_layers=assigner_conv_layers,
             dropout=0.1,
@@ -1062,10 +1049,11 @@ class Assigner(FairseqEncoder):
 
         x = self.feature_extractor(encoded)
         x = self.proj(x)[:, :, 0]
-        x = torch.sigmoid(x) + eps
+        features_pen = x.pow(2).mean()
+        x = torch.sigmoid(x - 2.0) * THRESHOLD # x=0, alpha=0.1
         x = x * (~padding_mask)
 
-        return x
+        return x, features_pen
 
 
 class FCDecoder(FairseqDecoder):
@@ -1098,7 +1086,7 @@ class FCDecoder(FairseqDecoder):
         return x
 
 
-class Conv2DFeatureExtractionModel(nn.Module):
+class Conv1DFeatureExtractionModel(nn.Module):
     def __init__(
         self,
         dim_input: int,
@@ -1113,37 +1101,6 @@ class Conv2DFeatureExtractionModel(nn.Module):
         assert output in {"valid", "same"}
         self.output = output
 
-        def block(n_in, n_out, k, stride, is_layer_norm=False, is_group_norm=False, conv_bias=False):
-            def make_conv():
-                conv = nn.Conv1d(n_in, n_out, k, stride=stride, bias=conv_bias)
-                nn.init.kaiming_normal_(conv.weight)
-                return conv
-
-            assert (
-                is_layer_norm and is_group_norm
-            ) == False, "layer norm and group norm are exclusive"
-
-            if is_layer_norm:
-                return nn.Sequential(
-                    make_conv(),
-                    nn.Dropout(p=dropout),
-                    nn.Sequential(
-                        TransposeLast(),
-                        Fp32LayerNorm(dim, elementwise_affine=True),
-                        TransposeLast(),
-                    ),
-                    nn.GELU(),
-                )
-            elif is_group_norm:
-                return nn.Sequential(
-                    make_conv(),
-                    nn.Dropout(p=dropout),
-                    Fp32GroupNorm(dim, dim, affine=True),
-                    nn.GELU(),
-                )
-            else:
-                return nn.Sequential(make_conv(), nn.Dropout(p=dropout), nn.GELU())
-
         in_d = dim_input
         self.conv_layers = nn.ModuleList()
         for i, cl in enumerate(conv_layers):
@@ -1151,7 +1108,7 @@ class Conv2DFeatureExtractionModel(nn.Module):
             (dim, k, stride) = cl
 
             self.conv_layers.append(
-                block(in_d, dim, k, stride,
+                conv_1d_block(in_d, dim, k, stride, dropout=0.0,
                     is_layer_norm=mode == "layer_norm",
                     is_group_norm=mode == "default" and i == 0,
                     conv_bias=conv_bias)
@@ -1162,12 +1119,12 @@ class Conv2DFeatureExtractionModel(nn.Module):
         if self.output == 'same':
             length = x.size(1)
             x = F.pad(x, [0,0,0,20,0,0])
-        x = x.transpose(1,2)
+        x = x.transpose(1, 2)
 
         for conv in self.conv_layers:
             x = conv(x)
 
-        x = x.transpose(1,2)
+        x = x.transpose(1, 2)
 
         if self.output == 'same':
             x = x[:, :length, :]
@@ -1233,7 +1190,7 @@ def cif_architecture(args):
     args.extractor_mode = getattr(args, "extractor_mode", 'default')
     args.conv_bias = getattr(args, "conv-bias", False)
     args.lambda_qua = getattr(args, "lambda_qua", 0.05)
-    args.lambda_cp = getattr(args, "lambda_cp", 0.1)
+    args.lambda_cp = getattr(args, "lambda_alpha", 0.1)
     seq2seq_architecture(args)
 
 

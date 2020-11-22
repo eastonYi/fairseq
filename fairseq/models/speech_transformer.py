@@ -88,6 +88,8 @@ class SpeechTransformerModel(TransformerModel):
         super().__init__(args, encoder, decoder)
         self.args = args
         self.conv = conv
+        self.num_updates = 0
+        self.teacher_forcing_updates = args.teacher_forcing_updates
 
     @staticmethod
     def add_args(parser):
@@ -96,6 +98,9 @@ class SpeechTransformerModel(TransformerModel):
         add_spec_args(parser)
         add_conv_args(parser)
         TransformerModel.add_args(parser)
+        parser.add_argument(
+            "--teacher-forcing-updates", type=int, default=999999, help="is teacher-forcing"
+        )
 
     @classmethod
     def build_model(cls, args, task):
@@ -206,6 +211,11 @@ class SpeechTransformerModel(TransformerModel):
                 features[b, t0s[b]:t0s[b]+ts[b], :] = time_means[b][None, :]
 
         return features, feature_lengths
+
+    def set_num_updates(self, num_updates):
+        """Set the number of parameters updates."""
+        super().set_num_updates(num_updates)
+        self.num_updates = num_updates
 
 
 @register_model_architecture("speech_transformer", "speech_transformer")
@@ -337,8 +347,8 @@ class SpeechTransformerEncoder(TransformerEncoder):
         Optional[Tensor] in EncoderOut, they need to be copied as local
         variables for Torchscript Optional refinement
         """
-        encoder_padding_mask: Optional[Tensor] = encoder_out.encoder_padding_mask
-        encoder_embedding: Optional[Tensor] = encoder_out.encoder_embedding
+        encoder_padding_mask = encoder_out.encoder_padding_mask
+        encoder_embedding = encoder_out.encoder_embedding
 
         new_encoder_out = (
             encoder_out.encoder_out
