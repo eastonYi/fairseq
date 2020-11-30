@@ -644,7 +644,7 @@ def eval_bool(x, default=False):
 
 # pytorch
 
-def sequence_mask(lengths, maxlen=None, depth=None, dtype=torch.float):
+def sequence_mask(lengths, maxlen=None, depth=None, dtype=torch.float, reverse=False):
     if maxlen is None:
         maxlen = lengths.max()
     mask = torch.ones((len(lengths), maxlen),
@@ -653,7 +653,15 @@ def sequence_mask(lengths, maxlen=None, depth=None, dtype=torch.float):
     if depth:
         mask = mask.unsqueeze(-1).repeat(1, 1, depth)
 
-    return mask.type(dtype)
+    mask = mask.type(dtype)
+
+    if reverse:
+        if dtype == torch.bool:
+            mask = ~mask
+        else:
+            mask = 1 - mask
+
+    return mask
 
 
 def ctc_shrink(hidden, logits, len_logits, blk, at_least_one=True):

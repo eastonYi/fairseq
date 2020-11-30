@@ -115,10 +115,9 @@ class TransformerSentenceEncoder(nn.Module):
         self.traceable = traceable
         self.tpu = False  # whether we're on TPU
 
-        if use_internal_embedding:
-            self.embed_tokens = self.build_embedding(
-                self.vocab_size, self.embedding_dim, self.padding_idx
-            )
+        self.embed_tokens = self.build_embedding(
+            self.vocab_size, self.embedding_dim, self.padding_idx
+        )
         self.embed_scale = embed_scale
 
         if q_noise > 0:

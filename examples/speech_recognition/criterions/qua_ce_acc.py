@@ -14,7 +14,7 @@ from fairseq import utils
 from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_loss
 
-from .cross_entropy_acc import CrossEntropyWithAccCriterion, LabelSmoothedCrossEntropyWithAccCriterion
+from .cross_entropy_acc import LabelSmoothedCrossEntropyWithAccCriterion
 
 
 @register_criterion("qua_ce_acc")
@@ -49,10 +49,11 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
         _number = net_output["num_output"]
         number = sample["target_lengths"].float()
         diff = torch.sqrt(torch.pow(_number - number, 2)).sum()
+        qua_loss = diff
         # alphas_pen
-        alphas_pen = net_output["alphas_pen"]
-        qua_loss = diff +  self.args.lambda_alpha * alphas_pen
-        target = sample["target"] # no eos bos
+        # alphas_pen = net_output["alphas_pen"]
+        # qua_loss = diff + self.args.lambda_alpha * alphas_pen
+        target = sample["target"]  # no eos bos
         # N, T -> N * T
         target = target.view(-1)
         lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
@@ -73,10 +74,6 @@ class QuantityCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWithAccCrite
         ce_loss, _ = label_smoothed_nll_loss(
             lprobs, target.long(), 0.1, ignore_index=self.padding_idx, reduce=reduction,
         )
-
-        if torch.isnan(qua_loss.sum() + ce_loss.sum() + lprobs.sum()):
-            import pdb; pdb.set_trace()
-            print('here')
 
         return lprobs, qua_loss, ce_loss
 
@@ -217,10 +214,11 @@ class QuantityCrossEntropyWithAccCriterionV2(LabelSmoothedCrossEntropyWithAccCri
         _number = net_output["num_output"]
         number = sample["target_lengths"].float()
         diff = torch.sqrt(torch.pow(_number - number, 2)).sum()
+        qua_loss = diff
         # alphas_pen
-        alphas_pen = net_output["alphas_pen"]
-        qua_loss = diff +  self.args.lambda_alpha * alphas_pen
-        target = sample["target"] # no eos bos
+        # alphas_pen = net_output["alphas_pen"]
+        # qua_loss = diff + self.args.lambda_alpha * alphas_pen
+        target = sample["target"]  # no eos bos
         # N, T -> N * T
         target = target.view(-1)
         lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
@@ -290,27 +288,34 @@ class QuantityCrossEntropyWithAccCriterionV2(LabelSmoothedCrossEntropyWithAccCri
             We need to make a change to support all FairseqEncoder models.
         """
         net_output = model(**sample["net_input"])
-        lprobs, qua_loss, ce_loss = self.compute_loss(
-            model, net_output, sample, reduction, log_probs
-        )
+        num_output = net_output["num_output"].int()
 
-        nsentences = sample["target"].size(0) + 1.0
-        ntokens = sample["ntokens"]
-        loss = self.args.lambda_qua * qua_loss * ntokens / nsentences + ce_loss
+        if model.training:
+            lprobs, qua_loss, ce_loss = self.compute_loss(
+                model, net_output, sample, reduction, log_probs
+            )
 
-        sample_size, logging_output = self.get_logging_output(
-            sample, lprobs, loss, qua_loss, ce_loss
-        )
+            nsentences = sample["target"].size(0) + 1.0
+            ntokens = sample["ntokens"]
+            loss = self.args.lambda_qua * qua_loss * ntokens / nsentences + ce_loss
 
-        if not model.training:
+            sample_size, logging_output = self.get_logging_output(
+                sample, lprobs, loss, qua_loss, ce_loss
+            )
+        else:
             import editdistance
 
+            loss = qua_loss = sample_size = 0.0
+            logging_output = {
+                "ntokens": sample["ntokens"],
+                "nsentences": sample["target"].size(0),
+                "sample_size": sample_size
+            }
             c_err = 0
             c_len = 0
             with torch.no_grad():
-                for lp, t in zip(lprobs, sample["target"]):
-                    decoded = lp.argmax(dim=-1).unique_consecutive()
-
+                for logits, l, t in zip(net_output['logits'], num_output, sample["target"]):
+                    decoded = logits.argmax(dim=-1)[:l]
                     p = (t != self.task.target_dictionary.pad()) & (
                         t != self.task.target_dictionary.eos()
                     )
@@ -332,8 +337,8 @@ class QuantityCrossEntropyWithAccCriterionV2(LabelSmoothedCrossEntropyWithAccCri
         correct_sum = sum(log.get("correct", 0) for log in logging_outputs)
         total_sum = sum(log.get("total", 0) for log in logging_outputs)
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
-        ce_loss = sum(log['ce_loss'] for log in logging_outputs)
-        qua_loss = sum(log['qua_loss'] for log in logging_outputs)
+        ce_loss = sum(log.get("ce_loss", 0) for log in logging_outputs)
+        qua_loss = sum(log.get("qua_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)

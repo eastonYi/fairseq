@@ -33,11 +33,12 @@ from fairseq.modules import (
 
 from .wav2vec2 import conv_1d_block
 from .wav2vec2_ctc import add_common_args, Wav2VecEncoder, Linear, base_architecture
+from .wav2vec2_cif import CIFFcModel, cif_architecture
 
 PAD_IDX = 1
 EOS_IDX = 2
 eps = 1e-7
-THRESHOLD = 0.9
+THRESHOLD = 0.95
 
 def build_embedding(dictionary, embed_dim):
     num_embeddings = len(dictionary)
@@ -371,11 +372,11 @@ class TransformerCTCShrinkModel(TransformerModel):
         return logits, preds
 
 
-@register_model("wav2vec_cif")
-class CIFModel(TransformerModel):
+@register_model("wav2vec_cif_de")
+class CIFDeModel(CIFFcModel):
     def __init__(self, args, encoder, assigner, decoder):
-        super().__init__(args, encoder, decoder)
-        self.assigner = assigner
+        super().__init__(args, encoder, assigner)
+        self.decoder = decoder
 
     @staticmethod
     def add_args(parser):
@@ -407,13 +408,9 @@ class CIFModel(TransformerModel):
 
         encoder = cls.build_encoder(args)
         assigner = cls.build_assigner(args, encoder.d)
-        decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
+        decoder = cls.build_encoder(args, tgt_dict, decoder_embed_tokens)
 
         return cls(args, encoder, assigner, decoder)
-
-    @classmethod
-    def build_assigner(cls, args, dim_input):
-        return Assigner(args, dim_input)
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
@@ -436,94 +433,6 @@ class CIFModel(TransformerModel):
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
                 'alphas': alphas, 'num_output': num_output, 'alphas_pen': alphas_pen}
-
-    @staticmethod
-    def cif(encoder_output, alphas, threshold=0.9, log=False):
-        if 'encoded' in encoder_output.keys():
-            hidden = encoder_output['encoded']
-        else:
-            hidden = encoder_output['encoder_out']
-        device = hidden.device
-        B, T, H = hidden.size()
-
-        # loop varss
-        integrate = torch.zeros([B]).to(device)
-        frame = torch.zeros([B, H]).to(device)
-        # intermediate vars along time
-        list_fires = []
-        list_frames = []
-
-        for t in range(T):
-            alpha = alphas[:, t]
-            distribution_completion = torch.ones([B]).to(device) - integrate
-
-            integrate += alpha
-            list_fires.append(integrate)
-
-            fire_place = integrate > threshold
-            integrate = torch.where(fire_place,
-                                    integrate - torch.ones([B]).to(device),
-                                    integrate)
-            cur = torch.where(fire_place,
-                              distribution_completion,
-                              alpha)
-            remainds = alpha - cur
-
-            frame += cur[:, None] * hidden[:, t, :]
-            list_frames.append(frame)
-            frame = torch.where(fire_place[:, None].repeat(1, H),
-                                remainds[:, None] * hidden[:, t, :],
-                                frame)
-            if log:
-                print('t: {}\t{:.3f} -> {:.3f}|{:.3f} fire: {}'.format(
-                    t, integrate[log], cur[log], remainds[log], fire_place[log]))
-
-        fires = torch.stack(list_fires, 1)
-        frames = torch.stack(list_frames, 1)
-        list_ls = []
-        len_labels = torch.round(alphas.sum(-1)).int()
-        max_label_len = len_labels.max()
-        for b in range(B):
-            fire = fires[b, :]
-            l = torch.index_select(frames[b, :, :], 0, torch.where(fire > threshold)[0])
-            pad_l = torch.zeros([max_label_len - l.size(0), H]).to(device)
-            list_ls.append(torch.cat([l, pad_l], 0))
-
-        if log:
-            print('fire:\n', fires)
-            print('fire place:\n', torch.where(fires > threshold))
-
-        return torch.stack(list_ls, 0)
-
-    @staticmethod
-    def resize(alphas, target_lengths, noise=0.4, threshold=0.9):
-        """
-        alpha in thresh=0.9 | (-0.095, +0.41)
-        """
-        device = alphas.device
-        # sum
-        _num = alphas.sum(-1)
-
-        # scaling
-        num = target_lengths.float()
-        num_noise = num + (noise + 0.105) * torch.rand(alphas.size(0)).to(device) - 0.095
-        # num_noise = num + 2 * noise * torch.rand(alphas.size(0)).to(device) - noise
-        if (torch.round(num) < 1).float().sum() > 0 or \
-           (torch.round(num_noise) < 1).float().sum() > 0:
-            import pdb; pdb.set_trace()
-        _alphas = alphas * (num_noise / _num)[:, None].repeat(1, alphas.size(1))
-
-        # rm attention value that exceeds threashold
-        while len(torch.where(_alphas > threshold)[0]):
-            print('fixing alpha')
-            xs, ys = torch.where(_alphas > threshold)
-            for x, y in zip(xs, ys):
-                if _alphas[x][y] >= threshold:
-                    mask = _alphas[x].ne(0).float()
-                    mean = 0.5 * _alphas[x].sum() / mask.sum()
-                    _alphas[x] = _alphas[x] * 0.5 + mean * mask
-
-        return _alphas, _num
 
     def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
         encoder_padding_mask = encoded_shrunk.abs().sum(-1).eq(0)
@@ -567,7 +476,7 @@ class CIFModel(TransformerModel):
 
 
 @register_model("wav2vec_cif_rnn")
-class CIF_RNN_Model(CIFModel):
+class CIF_RNN_Model(CIFFcModel):
 
     @classmethod
     def build_model(cls, args, task):
@@ -1050,7 +959,7 @@ class Assigner(FairseqEncoder):
         x = self.feature_extractor(encoded)
         x = self.proj(x)[:, :, 0]
         features_pen = x.pow(2).mean()
-        x = torch.sigmoid(x - 2.0) * THRESHOLD # x=0, alpha=0.1
+        x = torch.sigmoid(x) * 0.3 # x=0, alpha=0.1
         x = x * (~padding_mask)
 
         return x, features_pen
@@ -1182,15 +1091,6 @@ def ctc_seq2seq_architecture(args):
 
 @register_model_architecture("wav2vec_ctc_shrink_seq2seq", "wav2vec_ctc_shrink_seq2seq")
 def ctc_shrink_seq2seq_architecture(args):
-    seq2seq_architecture(args)
-
-
-@register_model_architecture("wav2vec_cif", "wav2vec_cif")
-def cif_architecture(args):
-    args.extractor_mode = getattr(args, "extractor_mode", 'default')
-    args.conv_bias = getattr(args, "conv-bias", False)
-    args.lambda_qua = getattr(args, "lambda_qua", 0.05)
-    args.lambda_cp = getattr(args, "lambda_alpha", 0.1)
     seq2seq_architecture(args)
 
 

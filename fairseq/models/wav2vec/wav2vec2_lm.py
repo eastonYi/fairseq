@@ -31,14 +31,16 @@ from fairseq.modules import (
 )
 
 from .wav2vec2_ctc import add_common_args, base_architecture
+from .wav2vec2_cif import (
+    CIFFcModel,
+    Assigner,
+    cif_architecture,
+)
 from .wav2vec2_seq2seq import (
-    CIFModel,
     LSTMDecoder,
     build_embedding,
     Wav2VecEncoder,
     Linear,
-    Assigner,
-    cif_architecture,
     add_decoder_args
 )
 
@@ -59,18 +61,25 @@ def add_mixer_args(parser):
 
 
 @register_model("wav2vec_ctc_lm")
-class W2V_CTC_MIX_LM(CIFModel):
-    def __init__(self, args, encoder, mixer, lm):
-        super().__init__(args, encoder, mixer, lm)
-        self.mixer = mixer
+class W2V_CTC_LM(BaseFairseqModel):
+    def __init__(self, args, encoder, lm):
+        super().__init__()
+        self.args = args
+        self.encoder = encoder
         self.lm = lm
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
+        self.proj = Linear(encoder.d, lm.encoder.encoder.sentence_encoder.embedding_dim)
 
     @staticmethod
     def add_args(parser):
         add_common_args(parser)
         add_decoder_args(parser)
-        add_mixer_args(parser)
+        parser.add_argument(
+            "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
+        )
+        parser.add_argument(
+            "--lm-path", type=str, help="dim-hidden-mixer"
+        )
 
     @classmethod
     def build_model(cls, args, task):
@@ -91,17 +100,12 @@ class W2V_CTC_MIX_LM(CIFModel):
 
         encoder = cls.build_encoder(args, tgt_dict)
         lm = cls.build_lm(args, tgt_dict)
-        mixer = cls.build_mixer(args, encoder.d + lm.dim_output, args.dim_hidden_mixer, 1, len(tgt_dict))
 
-        return cls(args, encoder, mixer, lm)
+        return cls(args, encoder, lm)
 
     @classmethod
     def build_encoder(cls, args, tgt_dict=None):
         return Wav2VecEncoder(args, tgt_dict)
-
-    @classmethod
-    def build_mixer(cls, args, dim_input, dim_hidden, dim_output):
-        return Linear(dim_input, dim_output)
 
     @classmethod
     def build_lm(cls, args, dictionary):
@@ -136,6 +140,92 @@ class W2V_CTC_MIX_LM(CIFModel):
             prev_decoded = torch.cat([prev_decoded, cur_token], 1)
 
         logits = torch.stack(list_logits, 1)
+        logits.batch_first = True
+
+        return logits
+
+    def get_normalized_probs(self, net_output, log_probs):
+        """Get normalized probabilities (or log probs) from a net's output."""
+
+        ctc_logits = net_output["encoder_output"]["encoder_out"]
+        logits = net_output["logits"]
+
+        if log_probs:
+            ctc_res = utils.log_softmax(ctc_logits.float(), dim=-1)
+            res = utils.log_softmax(logits.float(), dim=-1)
+        else:
+            ctc_res = utils.softmax(ctc_logits.float(), dim=-1)
+            res = utils.softmax(logits.float(), dim=-1)
+
+        return ctc_res, res
+
+
+@register_model("wav2vec_ctc_bert")
+class W2V_CTC_BERT(W2V_CTC_LM):
+
+    def __init__(self, args, encoder, lm):
+        super().__init__(args, encoder, lm)
+
+    @staticmethod
+    def add_args(parser):
+        add_common_args(parser)
+        parser.add_argument(
+            "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
+        )
+        parser.add_argument(
+            "--lm-path", type=str, help="dim-hidden-mixer"
+        )
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+        global PAD_IDX, BLK_IDX, EOS_IDX
+        # make sure all arguments are present in older models
+        w2v_lm_architecture(args)
+
+        if not hasattr(args, "max_source_positions"):
+            args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
+
+        tgt_dict = task.target_dictionary
+        PAD_IDX = tgt_dict.pad()
+        EOS_IDX = tgt_dict.eos()
+        BLK_IDX = tgt_dict.index("<ctc_blank>")
+
+        encoder = cls.build_encoder(args, tgt_dict)
+        lm = cls.build_lm(args, tgt_dict)
+
+        return cls(args, encoder, lm)
+
+    @classmethod
+    def build_lm(cls, args, dictionary):
+        from fairseq.models.masked_lm import MaskedLMModel as LM
+        args.tokens_per_sample = 50
+        return LM.build_model(args, task=None, dictionary=dictionary)
+
+    def forward(self, **kwargs):
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        encoded = encoder_output['encoded']
+        logits = encoder_output['encoder_out']
+        encoded_shrunk, len_encoded_shrunk = utils.ctc_shrink(
+            hidden=logits, logits=logits, pad=PAD_IDX, blk=BLK_IDX, at_least_one=True)
+        encoder_shrunk_out = {'encoded_shrunk': encoded_shrunk,
+                              'len_encoded_shrunk': len_encoded_shrunk}
+
+        logits = self.decode(encoder_shrunk_out)
+
+        return {'logits': logits, 'len_logits': len_encoded_shrunk, 'encoder_output': encoder_output}
+
+    def decode(self, encoder_shrunk_out):
+        encoded_logits = encoder_shrunk_out["encoded_shrunk"]
+        prob = torch.softmax(encoded_logits[:, :, :-1], -1)
+
+        ft = self.freeze_lm_finetune_updates <= self.num_updates
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            embedded = prob * self.lm.embedding
+            logits = self.lm.forward_embeded(embedded)
+
         logits.batch_first = True
 
         return logits
@@ -202,6 +292,13 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
         from fairseq.models.lstm_lm import LSTMLanguageModel
         return LSTMLanguageModel.build_model(args, task)
 
+    @classmethod
+    def build_bert(cls):
+        from transformers import BertModel
+
+        bert = BertModel.from_pretrained("hfl/rbt3")
+        return bert
+
     def forward(self, **kwargs):
         encoder_output = self.encoder(tbc=False, **kwargs)
         alphas = self.assigner(encoder_output)
@@ -230,6 +327,7 @@ class W2V_MIX_LM(W2V_CTC_MIX_LM):
 
     # teacher-forcing
     def decode(self, encoded_shrunk, prev_output_tokens=None, incremental_states=None, t=None):
+
         if incremental_states is not None: # step forward
             assert prev_output_tokens is not None, t is not None
             # t, incremental_state = incremental_states # t, ({...}, {...})
@@ -607,6 +705,8 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
             args.max_target_positions = 2048
 
         lm = cls.build_lm(args, task.dictionary)
+        # lm = cls.build_bert()
+        # import pdb; pdb.set_trace()
         encoder = cls.build_encoder(args) # encoder
         assigner = cls.build_assigner(args, encoder.d)
 
@@ -634,6 +734,13 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         args.tokens_per_sample = 100
         return LM.build_model(args, task=None, dictionary=dictionary)
 
+    @classmethod
+    def build_bert(cls):
+        from transformers import BertModel
+
+        bert = BertModel.from_pretrained("hfl/rbt3")
+        return bert
+
     def forward(self, **kwargs):
         """
         encoder_output= "encoder_out": x,
@@ -645,16 +752,32 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         alphas, alphas_pen = self.assigner(encoder_output)
         _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
         cif_outputs = self.cif(encoder_output, _alphas)
+
+        if self.training and cif_outputs.abs().sum(-1).ne(0).sum() != kwargs['target_lengths'].sum():
+            print('_alphas:\t', _alphas.sum(-1))
+            print('alphas:\t', alphas.sum(-1))
+            print('target:\t', kwargs['target_lengths'])
+            import pdb; pdb.set_trace()
+
         hidden = self.proj(cif_outputs)
         padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
         # logits = self.proj(cif_outputs)
 
-        # ft = self.freeze_lm_finetune_updates <= self.num_updates
-        # with torch.no_grad() if not ft else contextlib.ExitStack():
-        logits = self.lm.forward_embeded(hidden, padding_mask)
+        ft = self.freeze_lm_finetune_updates <= self.num_updates
+        if self.freeze_lm_finetune_updates == self.num_updates: print('unfreeze LM ...')
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            logits = self.lm.forward_embeded(hidden, padding_mask)
+            # logits = self.forward_embeded(hidden, padding_mask)
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
                 'alphas': alphas, 'num_output': num_output, 'alphas_pen': alphas_pen}
+
+    def forward_embeded(self, hidden, padding_mask):
+        import pdb; pdb.set_trace()
+        encoded = self.lm.encoder(hidden)
+        encoded = self.lm.pooler(encoded)
+
+        return encoded
 
     def get_normalized_probs(self, net_output, log_probs):
         """Get normalized probabilities (or log probs) from a net's output."""
@@ -667,6 +790,10 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
 
         return res
 
+    def set_num_updates(self, num_updates):
+        """Set the number of parameters updates."""
+        super().set_num_updates(num_updates)
+        self.num_updates = num_updates
 
 from fairseq.models.lstm import LSTMCell
 class LSTM_MIXER(LSTMDecoder):
@@ -797,10 +924,17 @@ def w2v_cif_lm_architecture(args):
 def w2v_cif_rnn_lm_architecture(args):
     w2v_cif_lm_architecture(args)
 
+
 @register_model_architecture("wav2vec_cif_lm_rnn", "wav2vec_cif_lm_rnn")
 def w2v_cif_lm_rnn_architecture(args):
     w2v_cif_lm_architecture(args)
 
+
 @register_model_architecture("wav2vec_cif_bert", "wav2vec_cif_bert")
 def w2v_cif_bert_architecture(args):
+    w2v_lm_architecture(args)
+
+
+@register_model_architecture("wav2vec_ctc_bert", "wav2vec_ctc_bert")
+def w2v_ctc_bert_architecture(args):
     w2v_lm_architecture(args)

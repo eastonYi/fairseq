@@ -41,23 +41,14 @@ class CtcCeCriterion(FairseqCriterion):
             pass  # this option might have been added from eval args
 
     def forward(self, model, sample, reduce=True):
-        # net_output = model(**sample["net_input"])
-        encoder_output = model.encoder(tbc=False, **sample["net_input"])
-        encoder_shrunk_output = model.ctc_shrink(encoder_output)
-        logits, _ = model.batch_greedy_decode(
-            encoder_shrunk_output,
-            SOS_ID=self.bos_idx,
-            vocab_size=self.vocab_size,
-            max_decode_len=60)
-        logits_ctc = encoder_output["encoder_out"]
-        # (B, T, C) from the encoder
-        ctc_lprobs, lprobs = model.get_normalized_probs(logits_ctc, logits, log_probs=True)
+        net_output = model(**sample["net_input"])
+        ctc_lprobs, lprobs = model.get_normalized_probs(net_output, log_probs=True)
 
-        len_ctc_logits = (~encoder_output["padding_mask"]).long().sum(-1)
+        len_logits_ctc = net_output["len_logits_ctc"]
         target = sample["target"] # without sos or eos
         target_lengths = sample["target_lengths"]
 
-        ctc_loss = self.cal_ctc_loss(ctc_lprobs, len_ctc_logits, target, target_lengths-1)
+        ctc_loss = self.cal_ctc_loss(ctc_lprobs, len_logits_ctc, target, target_lengths)
         if abs(lprobs.size(1) - target.size(1)) < 5:
             if lprobs.size(1) != target.size(1):
                 min_length = min(lprobs.size(1), target.size(1))
@@ -66,7 +57,7 @@ class CtcCeCriterion(FairseqCriterion):
             ce_loss, correct, total = self.cal_ce_loss(lprobs, target)
             loss = ctc_loss + ce_loss
         else:
-            ce_loss, correct, total = torch.zeros([1]), torch.ones([1]).int(), torch.ones([1]).int()
+            ce_loss, correct, total = 8.0 * target_lengths.sum(), torch.ones([1]).int(), target_lengths.sum()
             loss = ctc_loss
 
         ntokens = (
@@ -86,16 +77,25 @@ class CtcCeCriterion(FairseqCriterion):
 
         if not model.training:
 
-            ctc_lprobs = ctc_lprobs.float().cpu()
+            c_err = 0
+            c_len = 0
+            len_logits = net_output["len_logits"]
+            decodeds = lprobs.argmax(-1)
+            with torch.no_grad():
+                for decoded, t, inp_l in zip(decodeds, sample["target"], len_logits):
 
-            c_err, c_len = self.ctc_greedy_eval(
-                ctc_lprobs, len_ctc_logits, target,
-                pad_idx=self.pad_idx,
-                eos_idx=self.eos_idx,
-                blk_idx=self.blk_idx)
+                    p = (t != self.task.target_dictionary.pad()) & (
+                        t != self.task.target_dictionary.eos()
+                    )
+                    targ = t[p]
+                    targ_units_arr = targ.tolist()
+                    pred_units_arr = decoded.tolist()
 
-            logging_output["c_errors"] = c_err
-            logging_output["c_total"] = c_len
+                    c_err += editdistance.eval(pred_units_arr, targ_units_arr)
+                    c_len += len(targ_units_arr)
+
+                logging_output["c_errors"] = c_err
+                logging_output["c_total"] = c_len
 
         return loss, sample_size, logging_output
 

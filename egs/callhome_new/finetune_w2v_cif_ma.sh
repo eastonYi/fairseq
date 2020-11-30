@@ -11,7 +11,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --arch wav2vec_cif --task audio_cif --criterion qua_ce_acc --best-checkpoint-metric uer \
 --w2v-path $W2V_PATH \
 --assigner-conv-layers '[(512,3,1)] * 2 + [(512,2,1)] * 1' \
---decoder-embed-dim 768 --decoder-layers 4 --lambda-alpha 10.0 --lambda-qua 0.1 \
+--decoder-embed-dim 768 --decoder-layers 1 --lambda-alpha 10.0 --lambda-qua 0.1 \
 --apply-mask --mask-selection static --mask-other 0 --mask-length 10 --mask-prob 0.5 --layerdrop 0.1 \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 --mask-channel-prob 0.5 \
 --feature-grad-mult 0.0 --freeze-finetune-updates 200 \
