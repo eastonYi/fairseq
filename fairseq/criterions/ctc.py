@@ -150,7 +150,8 @@ class CtcCriterion(FairseqCriterion):
                     )
                     targ = t[p]
                     targ_units = self.task.target_dictionary.string(targ)
-                    targ_units_arr = targ.tolist()
+                    # targ_units_arr = targ.tolist()
+                    targ_units_arr = targ.unique_consecutive().tolist()
 
                     toks = lp.argmax(dim=-1).unique_consecutive()
                     pred_units_arr = toks[toks != self.blank_idx].tolist()

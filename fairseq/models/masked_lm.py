@@ -152,6 +152,7 @@ class MaskedLMModel(FairseqEncoderModel):
 
         return res
 
+
 class MaskedLMEncoder(FairseqEncoder):
     """
     Encoder for Masked Language Modelling.
@@ -274,42 +275,6 @@ class MaskedLMEncoder(FairseqEncoder):
             'pooled_output': pooled_output,
             'sentence_logits': sentence_logits
         }
-
-    def forward_embeded(self, embeded, padding_mask, **unused):
-        """
-        Forward pass for Masked LM encoder. This first computes the token
-        embedding using the token embedding matrix, position embeddings (if
-        specified) and segment embeddings (if specified).
-
-        Here we assume that the sentence representation corresponds to the
-        output of the classification_token (see bert_task or cross_lingual_lm
-        task for more details).
-        Args:
-            - src_tokens: B x T X H matrix representing sentences
-        Returns:
-            - a tuple of the following:
-                - logits for predictions in format B x T x C to be used in
-                  softmax afterwards
-                - a dictionary of additional data, where 'pooled_output' contains
-                  the representation for classification_token and 'inner_states'
-                  is a list of internal model states used to compute the
-                  predictions (similar in ELMO). 'sentence_logits'
-                  is the prediction logit for NSP task and is only computed if
-                  this is specified in the input arguments.
-        """
-
-        inner_states, sentence_rep = self.sentence_encoder.forward_embeded(embeded, padding_mask)
-
-        x = inner_states[-1].transpose(0, 1)
-
-        x = self.layer_norm(self.activation_fn(self.lm_head_transform_weight(x)))
-
-        # project back to size of vocabulary
-        x = self.embed_out(x)
-        if self.lm_output_learned_bias is not None:
-            x = x + self.lm_output_learned_bias
-
-        return x
 
     def max_positions(self):
         """Maximum output length supported by the encoder."""

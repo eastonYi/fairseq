@@ -308,13 +308,13 @@ class TransformerSentenceEncoder(nn.Module):
         if self.embed_positions is not None:
             x += self.embed_positions(torch.ones([x.size(0), x.size(1)]).to(x.device), positions=positions)
 
-        if self.quant_noise is not None:
-            x = self.quant_noise(x)
+        # if self.quant_noise is not None:
+        #     x = self.quant_noise(x)
 
         if self.emb_layer_norm is not None:
             x = self.emb_layer_norm(x)
 
-        x = self.dropout_module(x)
+        # x = self.dropout_module(x)
 
         # account for padding while computing the representation
         if padding_mask is not None:
@@ -323,21 +323,7 @@ class TransformerSentenceEncoder(nn.Module):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        inner_states = []
-        if not last_state_only:
-            inner_states.append(x)
-
         for layer in self.layers:
             x, _ = layer(x, self_attn_padding_mask=padding_mask)
-            if not last_state_only:
-                inner_states.append(x)
 
-        sentence_rep = x[0, :, :]
-
-        if last_state_only:
-            inner_states = [x]
-
-        if self.traceable:
-            return torch.stack(inner_states), sentence_rep
-        else:
-            return inner_states, sentence_rep
+        return x.transpose(0, 1)

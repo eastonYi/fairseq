@@ -134,43 +134,38 @@ class CIFFcModel(BaseFairseqModel):
 
     @staticmethod
     def cif(encoder_output, alphas, threshold=THRESHOLD, log=False):
-        if 'encoded' in encoder_output.keys():
+        if type(encoder_output) is Tensor:
+            hidden = encoder_output
+        elif 'encoded' in encoder_output.keys():
             hidden = encoder_output['encoded']
         else:
             hidden = encoder_output['encoder_out']
 
-        first_padding_pos = (~encoder_output['padding_mask']).sum(-1)
         device = hidden.device
         B, T, H = hidden.size()
 
         # loop varss
-        integrate = torch.zeros([B]).to(device)
-        frame = torch.zeros([B, H]).to(device)
+        integrate = torch.zeros([B], device=device)
+        frame = torch.zeros([B, H], device=device)
         # intermediate vars along time
         list_fires = []
         list_frames = []
 
         for t in range(T):
             alpha = alphas[:, t]
-            distribution_completion = torch.ones([B]).to(device) - integrate
+            distribution_completion = torch.ones([B], device=device) - integrate
 
             integrate += alpha
             list_fires.append(integrate)
 
             fire_place = integrate >= threshold
             integrate = torch.where(fire_place,
-                                    integrate - torch.ones([B]).to(device),
+                                    integrate - torch.ones([B], device=device),
                                     integrate)
             cur = torch.where(fire_place,
                               distribution_completion,
                               alpha)
-            cur = torch.where(t >= first_padding_pos,
-                              torch.zeros_like(cur),
-                              cur)
             remainds = alpha - cur
-            remainds = torch.where(t >= first_padding_pos,
-                                   torch.zeros_like(remainds),
-                                   remainds)
 
             frame += cur[:, None] * hidden[:, t, :]
             list_frames.append(frame)
@@ -179,7 +174,6 @@ class CIFFcModel(BaseFairseqModel):
                                 frame)
 
             if log:
-                import pdb; pdb.set_trace()
                 print('t: {}\t{:.3f} -> {:.3f}|{:.3f} fire: {}'.format(
                     t, integrate[log], cur[log], remainds[log], fire_place[log]))
 
@@ -191,7 +185,7 @@ class CIFFcModel(BaseFairseqModel):
         for b in range(B):
             fire = fires[b, :]
             l = torch.index_select(frames[b, :, :], 0, torch.where(fire >= threshold)[0])
-            pad_l = torch.zeros([max_label_len - l.size(0), H]).to(device)
+            pad_l = torch.zeros([max_label_len - l.size(0), H], device=device)
             list_ls.append(torch.cat([l, pad_l], 0))
 
             if log:
@@ -401,7 +395,8 @@ class CIFFcModelV2(BaseFairseqModel):
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
                 'alphas': alphas, 'num_output': num_output}
 
-    def get_alphas(self, encoder_output):
+    @staticmethod
+    def get_alphas(encoder_output):
         padding_mask = encoder_output['padding_mask']
 
         if 'encoded' in encoder_output.keys():
