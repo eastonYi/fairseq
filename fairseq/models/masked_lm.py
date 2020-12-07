@@ -133,7 +133,6 @@ class MaskedLMModel(FairseqEncoderModel):
             lm_args = state["args"]
             lm_args.data = args.data
             assert getattr(lm_args, "lm_path", None) is None
-            lm_args.use_internal_embedding = False
             task = tasks.setup_task(lm_args)
             encoder = task.build_model(lm_args)
             print('restore masked_lm from {}'.format(args.lm_path))
@@ -177,7 +176,6 @@ class MaskedLMEncoder(FairseqEncoder):
             activation_dropout=args.act_dropout,
             max_seq_len=self.max_positions,
             num_segments=args.num_segment,
-            use_internal_embedding=args.use_internal_embedding,
             use_position_embeddings=not args.no_token_positional_embeddings,
             encoder_normalize_before=args.encoder_normalize_before,
             apply_bert_init=args.apply_bert_init,
@@ -312,7 +310,6 @@ def base_architecture(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
     args.share_encoder_input_output_embed = getattr(args, 'share_encoder_input_output_embed', False)
     args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
-    args.use_internal_embedding = getattr(args, 'use_internal_embedding', True)
     args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
     args.num_segment = getattr(args, 'num_segment', 2)
 

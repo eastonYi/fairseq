@@ -544,7 +544,7 @@ class Conv1DFeatureExtractionModel(nn.Module):
     def forward(self, x):
         if self.output == 'same':
             length = x.size(1)
-            x = F.pad(x, [0, 0, 0, 50, 0, 0])
+            x = F.pad(x, [0, 0, 0, 10, 0, 0])
         x = x.transpose(1, 2)
 
         for conv in self.conv_layers:

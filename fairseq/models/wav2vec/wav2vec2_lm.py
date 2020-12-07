@@ -2,14 +2,10 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-import contextlib
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
 from typing import List, Tuple, Dict, Optional
 
-from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq import utils
 from fairseq.models import (
     FairseqEncoder,
@@ -43,15 +39,26 @@ from .wav2vec2_cif import (
     cif_architecture,
 )
 from .wav2vec2_seq2seq import (
-    LSTMDecoder,
-    build_embedding,
     Wav2VecEncoder,
-    Linear,
-    add_decoder_args
+    Linear
 )
 
 PAD_IDX = 1
 EOS_IDX = 2
+
+
+def padding2attention_mask(padding_mask):
+    """
+    gen_edge_mask(torch.tensor([3,4]), True)
+
+    tensor([[ True, False, False, False,  True, False],
+        [ True, False, False, False, False,  True]])
+    """
+    mask1 = F.pad(padding_mask, [0, 1, 0, 0], value=1)
+    mask2 = F.pad(padding_mask, [1, 0, 0, 0], value=0)
+    mask = 1 - mask1.int() * mask2.int()
+
+    return F.pad(mask, [1, 0, 0, 0], value=1)
 
 
 def add_lm_args(parser):
@@ -59,8 +66,12 @@ def add_lm_args(parser):
         "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
     )
     parser.add_argument(
+        "--gold-rate-range", type=str, help="gold-rate-range"
+    )
+    parser.add_argument(
         "--lm-path", type=str, help="dim-hidden-mixer"
     )
+    parser.add_argument("--bert-name", type=str, metavar="D", help="bert_name")
 
 
 @register_model("wav2vec_cif_bert")
@@ -76,7 +87,7 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.proj = Linear(encoder.d, lm.encoder.encoder.sentence_encoder.embedding_dim)
         self.final_proj = lambda x: x
-        # self.proj = Linear(encoder.d, lm.encoder.encoder.sentence_encoder.vocab_size)
+        self.gold_rate_range = eval(args.gold_rate_range)
 
     @staticmethod
     def add_args(parser):
@@ -145,12 +156,15 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         hidden = self.proj(cif_outputs)
 
         if self.training:
-            gold_rate = max((1 - self.num_updates / self.args.gold_updates) * 0.8, 0.0)
+            gold_rate = self.set_gold_rate()
             # gold_rate = 1.0
             input_ids = kwargs['target'].long()
         else:
             input_ids = None
             gold_rate = 0.0
+
+        if cif_outputs.size(1) == 0:
+            import pdb; pdb.set_trace()
 
         bert_output, gold_embedding, pred_mask = self.forward_embeded(
             hidden, padding_mask, input_ids, gold_rate)
@@ -206,6 +220,12 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
+    def set_gold_rate(self):
+        s, e = self.gold_rate_range
+        gold_rate = max((1 - self.num_updates / self.args.gold_updates) * (s-e), 0) + e
+
+        return gold_rate
+
 
 @register_model("wav2vec_cif_bertEx")
 class W2V_MIX_CIF_BERTEX(W2V_MIX_CIF_BERT):
@@ -222,7 +242,7 @@ class W2V_MIX_CIF_BERTEX(W2V_MIX_CIF_BERT):
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.proj = Linear(encoder.d, lm.embeddings.word_embeddings.weight.size(1))
         self.final_proj = Linear(lm.embeddings.word_embeddings.weight.size(1), len(tgt_dict))
-        self.position_ids = torch.arange(512).expand((1, -1)).long()
+        self.gold_rate_range = eval(args.gold_rate_range)
 
     @classmethod
     def build_model(cls, args, task):
@@ -235,7 +255,7 @@ class W2V_MIX_CIF_BERTEX(W2V_MIX_CIF_BERT):
         if not hasattr(args, "max_target_positions"):
             args.max_target_positions = 2048
 
-        lm, tokenizer = cls.build_bert()
+        lm, tokenizer = cls.build_bert(args)
         encoder = cls.build_encoder(args) # encoder
         assigner = cls.build_assigner(args, encoder.d)
 
@@ -244,31 +264,31 @@ class W2V_MIX_CIF_BERTEX(W2V_MIX_CIF_BERT):
         return cls(args, encoder, assigner, lm, tgt_dict, tokenizer)
 
     @classmethod
-    def build_bert(cls):
+    def build_bert(cls, args):
         from transformers import BertModel, BertTokenizer
 
-        bert = BertModel.from_pretrained("hfl/rbt3")
-        tokenizer = BertTokenizer.from_pretrained("hfl/rbt3")
-        # bert = BertModel.from_pretrained("hfl/chinese-bert-wwm-ext") # 400M
+        bert = BertModel.from_pretrained(args.bert_name)
+        tokenizer = BertTokenizer.from_pretrained(args.bert_name)
+
         return bert, tokenizer
 
     def forward_embeded(self, hidden, padding_mask, input_ids=None, gold_rate=0.0):
         # import pdb; pdb.set_trace()
         device = hidden.device
-        position_ids = self.position_ids[:, 1:hidden.size(1)+1].to(device)
 
         if input_ids is not None:
-            input_ids = self.index_convert(input_ids, padding_mask)
+            input_ids, edge_mask = self.index_convert(input_ids, padding_mask)
             gold_embedding = self.lm.embeddings.word_embeddings(input_ids)
-            pred_mask = (torch.rand(input_ids.size(), device=device) > gold_rate) * (~padding_mask)
+            pred_mask = (torch.rand(input_ids.size(), device=device) > gold_rate) * (~padding_mask) * (~edge_mask)
             hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
                                      hidden,
                                      gold_embedding)
         else:
+            _, edge_mask = self.index_convert(None, padding_mask)
             gold_embedding = pred_mask = None
             hidden_mix = hidden
 
-        embeddings = self.lm.embeddings(inputs_embeds=hidden_mix, position_ids=position_ids)
+        embeddings = self.lm.embeddings(inputs_embeds=hidden_mix)
         encoder_outputs = self.lm.encoder(
             embeddings,
             attention_mask=(~padding_mask).int()[:, None, None, :])
@@ -290,7 +310,7 @@ class W2V_MIX_CIF_BERTEX(W2V_MIX_CIF_BERT):
             sent_ids_ = self.tokenizer(sent)['input_ids'][1:-1] + [0] * (max_len-length)
             list_sents.append(sent_ids_)
 
-        return torch.tensor(list_sents).type_as(input_ids)
+        return torch.tensor(list_sents).type_as(input_ids), padding_mask
 
 
 @register_model("wav2vec_cif2_bert")
@@ -305,6 +325,7 @@ class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.proj = Linear(encoder.d-1, lm.encoder.encoder.sentence_encoder.embedding_dim)
         self.final_proj = lambda x: x
+        self.gold_rate_range = eval(args.gold_rate_range)
 
     @staticmethod
     def add_args(parser):
@@ -350,8 +371,7 @@ class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
         hidden = self.proj(cif_outputs)
 
         if self.training:
-            gold_rate = max((1 - self.num_updates / self.args.gold_updates) * 0.9, 0.0)
-            # gold_rate = 1.0
+            gold_rate = self.set_gold_rate()
             input_ids = kwargs['target'].long()
         else:
             input_ids = None
@@ -366,6 +386,95 @@ class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
                 'alphas': alphas, 'num_output': num_output,
                 'embedding': hidden, 'gold_embedding': gold_embedding, 'pred_mask': pred_mask,
                 'gold_rate': gold_rate}
+
+
+@register_model("wav2vec_cif2_bertEx")
+class W2V_MIX_CIF2_BERTEX(W2V_MIX_CIF2_BERT):
+
+    def __init__(self, args, encoder, lm, tgt_dict, tokenizer):
+        BaseFairseqModel.__init__(self)
+        self.encoder = encoder
+        self.lm = lm
+        self.tgt_dict = tgt_dict
+        self.tokenizer = tokenizer
+        self.num_updates = 0
+        self.args = args
+        self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
+        self.proj = Linear(encoder.d-1, lm.embeddings.word_embeddings.weight.size(1))
+        self.final_proj = Linear(lm.embeddings.word_embeddings.weight.size(1), len(tgt_dict))
+        self.gold_rate_range = eval(args.gold_rate_range)
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+        # make sure all arguments are present in older models
+        w2v_cif_bert_architecture(args)
+
+        if not hasattr(args, "max_source_positions"):
+            args.max_source_positions = 2048
+        if not hasattr(args, "max_target_positions"):
+            args.max_target_positions = 2048
+
+        lm, tokenizer = cls.build_bert(args)
+        encoder = cls.build_encoder(args) # encoder
+
+        tgt_dict = task.target_dictionary
+
+        return cls(args, encoder, lm, tgt_dict, tokenizer)
+
+    @classmethod
+    def build_bert(cls, args):
+        from transformers import BertModel, BertTokenizer
+
+        bert = BertModel.from_pretrained(args.bert_name)
+        tokenizer = BertTokenizer.from_pretrained(args.bert_name)
+
+        return bert, tokenizer
+
+    def forward_embeded(self, hidden, padding_mask, input_ids=None, gold_rate=0.0):
+        """
+        """
+        device = hidden.device
+
+        if input_ids is not None:
+            input_ids_, token_mask = self.index_convert(input_ids, padding_mask)
+            gold_embedding = self.lm.embeddings.word_embeddings(input_ids_)
+            pred_mask = (torch.rand(input_ids_.size(), device=device) > gold_rate) * token_mask
+            hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
+                                     F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
+                                     gold_embedding)
+        else:
+            gold_embedding = pred_mask = None
+            hidden_mix = F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0)
+
+        attention_mask = padding2attention_mask(padding_mask)
+
+        embeddings = self.lm.embeddings(inputs_embeds=hidden_mix)
+        encoder_outputs = self.lm.encoder(
+            embeddings,
+            attention_mask=attention_mask[:, None, None, :])
+
+        sequence_output = encoder_outputs[0][:, 1:-1, :] * (~padding_mask)[:, :, None]
+
+        return sequence_output, gold_embedding, pred_mask
+
+    def index_convert(self, input_ids, padding_mask):
+        """
+        pad: 0, unk: 100
+        """
+        max_len = input_ids.size(1)
+        lengths = (~padding_mask).sum(-1)
+        list_sents = []
+        for sent_ids, length in zip(input_ids, lengths):
+            sent = self.tgt_dict.string(sent_ids[:length])
+            sent = sent.replace('<unk>', '`').replace('[NOISE]', '`').replace('[VOCALIZED-NOISE]', '`').replace('[LAUGHTER]', '`')
+            sent_ids_ = self.tokenizer(sent)['input_ids'] + [0] * (max_len-length)
+            list_sents.append(sent_ids_)
+
+        bert_input_ids = torch.tensor(list_sents).type_as(input_ids)
+        token_mask = bert_input_ids.ne(101) * bert_input_ids.ne(102) * bert_input_ids.ne(0)
+
+        return bert_input_ids, token_mask
 
 
 @register_model_architecture("wav2vec_cif_bert", "wav2vec_cif_bert")
@@ -386,7 +495,7 @@ def w2v_cif_bertEx_architecture(args):
     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
 
 
-# @register_model_architecture("wav2vec_cif2_bertEx", "wav2vec_cif2_bertEx")
-# def w2v_cif_bertEx_architecture(args):
-#     cif_architecture(args)
-#     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
+@register_model_architecture("wav2vec_cif2_bertEx", "wav2vec_cif2_bertEx")
+def w2v_cif_bertEx_architecture(args):
+    cif_architecture(args)
+    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)

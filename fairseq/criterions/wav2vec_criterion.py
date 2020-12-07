@@ -14,7 +14,6 @@ from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_l
 from fairseq.logging.meters import safe_round
 
 
-
 @register_criterion('wav2vec')
 class Wav2vecCriterion(FairseqCriterion):
 
@@ -130,7 +129,6 @@ class Wav2vecCriterion(FairseqCriterion):
 
         total = sum(log.get("count", 0) for log in logging_outputs)
         metrics.log_scalar("_total", total)
-
 
         if total > 0:
             metrics.log_derived(

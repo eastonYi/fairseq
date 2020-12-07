@@ -380,15 +380,12 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
 
         # embedding_loss
         pred_mask = net_output["pred_mask"]
-        no_pad_mask = utils.sequence_mask(sample["target_lengths"], dtype=torch.float)
-        mask = ~pred_mask * no_pad_mask
-        embedding = net_output["embedding"]
+        embedding = F.pad(net_output["embedding"], [0, 0, 1, 1, 0, 0])
         gold_embedding = net_output["gold_embedding"].detach()
-        diff = (embedding - gold_embedding).sum(-1) * mask
+        diff = (embedding - gold_embedding).sum(-1) * (~pred_mask)
         embedding_loss = torch.sqrt(torch.pow(diff, 2) + 1e-6).sum()
 
-        target = sample["target"]  # no eos bos
-        target *= pred_mask
+        target = sample["target"] * pred_mask[:, 1:-1]
         # N, T -> N * T
         target = target.view(-1)
         lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
@@ -418,8 +415,7 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             lprobs.argmax(1).masked_select(mask) == targets.masked_select(mask)
         )
         total = torch.sum(mask)
-        sample_size = utils.item(mask.sum().float().data)
-        sample_size = utils.item(mask.sum().float().data)
+        sample_size = max(utils.item(mask.sum().float().data), 1.0)
 
         logging_output = {
             "loss": utils.item(loss.data),  # * sample['ntokens'],
@@ -473,7 +469,7 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             ntokens = sample["ntokens"]
             loss = ce_loss + \
                    self.args.lambda_qua * qua_loss * ntokens / nsentences + \
-                   self.args.lambda_embedding * embedding_loss
+                   self.args.lambda_embedding * embedding_loss / gold_rate
 
             sample_size, logging_output = self.get_logging_output(
                 sample, lprobs, targets, loss, qua_loss, embedding_loss, ce_loss, gold_rate
@@ -489,9 +485,10 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             }
             c_err = 0
             c_len = 0
+            e_len = 0
             with torch.no_grad():
                 for logits, l, t in zip(net_output['logits'], num_output, sample["target"]):
-                    decoded = logits.argmax(dim=-1)[:l]
+                    decoded = logits.argmax(dim=-1)[1:l+1]
                     p = (t != self.task.target_dictionary.pad()) & (
                         t != self.task.target_dictionary.eos()
                     )
@@ -502,8 +499,10 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
                     # pred_units_arr = decoded.unique_consecutive().tolist()
                     c_err += editdistance.eval(pred_units_arr, targ_units_arr)
                     c_len += len(targ_units_arr)
+                    e_len += abs(len(targ_units_arr) - len(pred_units_arr))
                 logging_output["c_errors"] = c_err
                 logging_output["c_total"] = c_len
+                logging_output["e_len"] = e_len
 
         return loss, sample_size, logging_output
 
@@ -520,12 +519,11 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
-        gold_size = sum(log.get("gold_size", 0) for log in logging_outputs)
         agg_output = {
             "loss": loss_sum / sample_size if sample_size > 0 else 0.0,
             "ce_loss": ce_loss / sample_size if sample_size > 0 else 0.0,
             "qua_loss": qua_loss / nsentences if nsentences > 0 else 0.0,
-            "embedding_loss": embedding_loss / gold_size if gold_size > 0 else 0.0,
+            "embedding_loss": embedding_loss / (sample_size * gold_rate) if (sample_size * gold_rate) > 0 else 0.0,
             # if args.sentence_avg, then sample_size is nsentences, then loss
             # is per-sentence loss; else sample_size is ntokens, the loss
             # becomes per-output token loss
@@ -533,7 +531,6 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             "ntokens": ntokens,
             "nsentences": nsentences,
             "sample_size": sample_size,
-            "gold_size": gold_size,
             "acc": correct_sum * 100.0 / total_sum if total_sum > 0 else 0.0,
             "correct": correct_sum,
             "total": total_sum,
@@ -543,7 +540,9 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             agg_output["nll_loss"] = ce_loss / ntokens
         c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
         c_total = sum(log.get("c_total", 1) for log in logging_outputs)
+        e_len = sum(log.get("e_len", 0) for log in logging_outputs)
         if c_total > 1:
+            agg_output["qua_error"] = e_len * 100.0 / c_total
             agg_output["uer"] = c_errors * 100.0 / c_total
         # loss: per output token loss
         # nll_loss: per sentence loss
