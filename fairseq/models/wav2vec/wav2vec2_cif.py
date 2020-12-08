@@ -404,7 +404,7 @@ class CIFFcModelV2(BaseFairseqModel):
         else:
             alphas = encoder_output['encoder_out'][:, :, -1]
 
-        alphas = torch.sigmoid(alphas) * 0.3 + 1e-3  # x=0, alpha=0.1
+        alphas = torch.sigmoid(alphas)
         alphas = alphas * (~padding_mask).float()
 
         return alphas
@@ -476,7 +476,7 @@ class Assigner(FairseqEncoder):
         x = self.feature_extractor(encoded)
         x = self.proj(x)[:, :, 0]
         features_pen = x.pow(2).mean()
-        x = torch.sigmoid(x) * 0.3 + 1e-3  # x=0, alpha=0.1
+        x = torch.sigmoid(x)
         x = x * (~padding_mask).float()
 
         return x, features_pen

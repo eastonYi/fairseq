@@ -60,7 +60,7 @@ class Dictionary(object):
         assert isinstance(sym, str)
         if sym in self.indices:
             return self.indices[sym]
-        return self.unk_index
+        return self.unk()
 
     def string(
         self,
@@ -156,7 +156,7 @@ class Dictionary(object):
 
         c = Counter(
             dict(
-                sorted(zip(self.symbols[self.nspecial :], self.count[self.nspecial :]))
+                sorted(zip(self.symbols[self.nspecial:], self.count[self.nspecial:]))
             )
         )
         for symbol, count in c.most_common(nwords - self.nspecial):
@@ -280,8 +280,8 @@ class Dictionary(object):
         self._save(
             f,
             zip(
-                ex_keys + self.symbols[self.nspecial :],
-                ex_vals + self.count[self.nspecial :],
+                ex_keys + self.symbols[self.nspecial:],
+                ex_vals + self.count[self.nspecial:],
             ),
         )
 
@@ -366,6 +366,73 @@ class Dictionary(object):
                     filename, tokenize, dict.eos_word
                 )
             )
+
+
+class BertDictionary(Dictionary):
+    """A mapping from symbols to consecutive integers"""
+
+    def __init__(self):
+        self.unk_word, self.pad_word = '[UNK]', '[PAD]'
+        self.cls_word, self.sep_word = '[CLS]', '[SEP]'
+        self.symbols = []
+        self.count = []
+        self.indices = {}
+        self.nspecial = len(self.symbols)
+
+    def add_from_file(self, f):
+        """
+        Loads a pre-existing dictionary from a text file and adds its symbols
+        to this instance.
+        """
+        if isinstance(f, str):
+            try:
+                with PathManager.open(f, "r", encoding="utf-8") as fd:
+                    self.add_from_file(fd)
+            except FileNotFoundError as fnfe:
+                raise fnfe
+            except UnicodeError:
+                raise Exception(
+                    "Incorrect encoding detected in {}, please "
+                    "rebuild the dataset".format(f)
+                )
+            return
+
+        lines = f.readlines()
+        indices_start_line = self._load_meta(lines)
+
+        for line in lines[indices_start_line:]:
+            try:
+                word = line.rstrip().rsplit(" ", 1)[0]
+                if word in self:
+                    raise RuntimeError(
+                        "Duplicate word found when loading Dictionary: '{}'. "
+                        "Duplicate words can overwrite earlier ones by adding the "
+                        "#fairseq:overwrite flag at the end of the corresponding row "
+                        "in the dictionary file. If using the Camembert model, please "
+                        "download an updated copy of the model file."
+                        .format(word)
+                    )
+                self.add_symbol(word, overwrite=False)
+            except ValueError:
+                raise ValueError(
+                    "Incorrect dictionary format, expected '<token>'"
+                )
+
+    def pad(self):
+        """Helper to get index of pad symbol"""
+        return self.index(self.pad_word)
+
+    def unk(self):
+        """Helper to get index of unk symbol"""
+        return self.index(self.unk_word)
+
+    def cls(self):
+        """Helper to get index of pad symbol"""
+        return self.index(self.cls_word)
+
+    def sep(self):
+        """Helper to get index of unk symbol"""
+        return self.index(self.sep_word)
 
 
 class TruncatedDictionary(object):

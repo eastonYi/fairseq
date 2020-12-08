@@ -7,7 +7,7 @@
 
 import os
 
-from fairseq.data import Dictionary, AddTargetDataset, FileAudioDataset
+from fairseq.data import Dictionary, BertDictionary, AddTargetDataset, FileAudioDataset
 from .audio_pretraining import AudioUnsuperviseTrainingTask
 from . import register_task
 
@@ -227,6 +227,51 @@ class AudioCifTask(AudioCtcTask):
             bos=self.dictionary.eos(),
             pad=self.dictionary.pad(),
             eos=None,
+            batch_targets=True,
+            process_label=process_label
+        )
+
+
+@register_task("audio_cif_bert")
+class AudioCifBertTask(AudioCtcTask):
+
+    @classmethod
+    def setup_task(cls, args, **kwargs):
+        """Setup the task (e.g., load google bert dictionaries)."""
+        dict_path = os.path.join(args.data, "vocab.txt")
+        if not os.path.isfile(dict_path):
+            raise FileNotFoundError("Dict not found: {}".format(dict_path))
+        tgt_dict = BertDictionary.load(dict_path)
+
+        print("| dictionary: {} types".format(len(tgt_dict)))
+        return cls(args, tgt_dict)
+
+    def load_dataset(self, split, **kwargs):
+        """Load a given dataset split.
+
+        Args:
+            split (str): name of the split (e.g., train, valid, test)
+        """
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
+
+        label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
+        labels = self.load_labels(label_path)
+        process_label = LabelEncoder(self.dictionary)
+        self.datasets[split] = AddTargetDataset(
+            self.datasets[split],
+            labels,
+            bos=self.dictionary.cls(),
+            pad=self.dictionary.pad(),
+            eos=self.dictionary.sep(),
             batch_targets=True,
             process_label=process_label
         )

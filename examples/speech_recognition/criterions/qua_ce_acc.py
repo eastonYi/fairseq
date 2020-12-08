@@ -7,6 +7,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import logging
 import math
+import random
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +16,8 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_loss
 
 from .cross_entropy_acc import LabelSmoothedCrossEntropyWithAccCriterion
+
+random.seed(0)
 
 
 @register_criterion("qua_ce_acc")
@@ -385,9 +388,8 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
         diff = (embedding - gold_embedding).sum(-1) * (~pred_mask)
         embedding_loss = torch.sqrt(torch.pow(diff, 2) + 1e-6).sum()
 
-        target = sample["target"] * pred_mask[:, 1:-1]
         # N, T -> N * T
-        target = target.view(-1)
+        target = sample["target"].view(-1)
         lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
         if not hasattr(lprobs, "batch_first"):
             logging.warning(
@@ -407,9 +409,11 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             lprobs, target.long(), 0.0, ignore_index=0, reduce=reduction,
         )
 
-        return lprobs, target, qua_loss, embedding_loss, ce_loss
+        target_masked = (sample["target"] * pred_mask[:, 1:-1]).view(-1)
 
-    def get_logging_output(self, sample, lprobs, targets, loss, qua_loss, embedding_loss, ce_loss, gold_rate):
+        return lprobs, target_masked, qua_loss, embedding_loss, ce_loss
+
+    def get_logging_output(self, sample, lprobs, targets, e_len, loss, qua_loss, embedding_loss, ce_loss, gold_rate):
         mask = targets != 0
         correct = torch.sum(
             lprobs.argmax(1).masked_select(mask) == targets.masked_select(mask)
@@ -428,6 +432,7 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             "sample_size": sample_size,
             "correct": utils.item(correct.data),
             "total": utils.item(total.data),
+            "e_len": e_len
         }
 
         return sample_size, logging_output
@@ -455,9 +460,8 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             as net_output.
             We need to make a change to support all FairseqEncoder models.
         """
-        sample["net_input"]["target"] = sample["target"]
         net_output = model(**sample["net_input"])
-        num_output = net_output["num_output"].int()
+        num_output = torch.round(net_output["num_output"]).int()
         gold_rate = net_output["gold_rate"]
 
         if model.training:
@@ -467,12 +471,13 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
 
             nsentences = sample["target"].size(0) + 1.0
             ntokens = sample["ntokens"]
+            e_len = int(sum(abs(sample["target_lengths"].data - num_output.data)))
             loss = ce_loss + \
                    self.args.lambda_qua * qua_loss * ntokens / nsentences + \
                    self.args.lambda_embedding * embedding_loss / gold_rate
 
             sample_size, logging_output = self.get_logging_output(
-                sample, lprobs, targets, loss, qua_loss, embedding_loss, ce_loss, gold_rate
+                sample, lprobs, targets, e_len, loss, qua_loss, embedding_loss, ce_loss, gold_rate
             )
         else:
             import editdistance
@@ -487,11 +492,10 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
             c_len = 0
             e_len = 0
             with torch.no_grad():
-                for logits, l, t in zip(net_output['logits'], num_output, sample["target"]):
-                    decoded = logits.argmax(dim=-1)[1:l+1]
-                    p = (t != self.task.target_dictionary.pad()) & (
-                        t != self.task.target_dictionary.eos()
-                    )
+                for i, logits, l, t in zip(range(9999), net_output['logits'], num_output, sample["target"]):
+                    # decoded = logits.argmax(dim=-1)[:l]
+                    p = t != self.task.target_dictionary.pad()
+                    decoded = logits.argmax(dim=-1)[:int(p.sum(-1))]
                     targ = t[p]
                     targ_units_arr = targ.tolist()
                     pred_units_arr = decoded.tolist()
@@ -499,7 +503,9 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
                     # pred_units_arr = decoded.unique_consecutive().tolist()
                     c_err += editdistance.eval(pred_units_arr, targ_units_arr)
                     c_len += len(targ_units_arr)
-                    e_len += abs(len(targ_units_arr) - len(pred_units_arr))
+                    e_len += abs(len(targ_units_arr) - len(pred_units_arr)) * 1.0
+                    # import pdb; pdb.set_trace()
+                self.logits2sent(pred_units_arr, targ_units_arr, model.tgt_dict)
                 logging_output["c_errors"] = c_err
                 logging_output["c_total"] = c_len
                 logging_output["e_len"] = e_len
@@ -507,10 +513,18 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
         return loss, sample_size, logging_output
 
     @staticmethod
+    def logits2sent(preds, targets, vocab):
+        if random.random() < 0.03:
+            pred = ' '.join(vocab[i] for i in preds)
+            target = ' '.join(vocab[i] for i in targets)
+            print('pred:\n{}\ntarget:\n{}\n'.format(pred, target))
+
+    @staticmethod
     def aggregate_logging_outputs(logging_outputs):
         """Aggregate logging outputs from data parallel training."""
         correct_sum = sum(log.get("correct", 0) for log in logging_outputs)
         total_sum = sum(log.get("total", 0) for log in logging_outputs)
+        e_len = sum(log.get("e_len", 0) for log in logging_outputs)
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         ce_loss = sum(log.get("ce_loss", 0) for log in logging_outputs)
         qua_loss = sum(log.get("qua_loss", 0) for log in logging_outputs)
@@ -519,31 +533,36 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
-        agg_output = {
-            "loss": loss_sum / sample_size if sample_size > 0 else 0.0,
-            "ce_loss": ce_loss / sample_size if sample_size > 0 else 0.0,
-            "qua_loss": qua_loss / nsentences if nsentences > 0 else 0.0,
-            "embedding_loss": embedding_loss / (sample_size * gold_rate) if (sample_size * gold_rate) > 0 else 0.0,
-            # if args.sentence_avg, then sample_size is nsentences, then loss
-            # is per-sentence loss; else sample_size is ntokens, the loss
-            # becomes per-output token loss
-            "gold_rate": gold_rate,
-            "ntokens": ntokens,
-            "nsentences": nsentences,
-            "sample_size": sample_size,
-            "acc": correct_sum * 100.0 / total_sum if total_sum > 0 else 0.0,
-            "correct": correct_sum,
-            "total": total_sum,
-            # total is the number of validate tokens
-        }
-        if sample_size != ntokens:
-            agg_output["nll_loss"] = ce_loss / ntokens
-        c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
-        c_total = sum(log.get("c_total", 1) for log in logging_outputs)
-        e_len = sum(log.get("e_len", 0) for log in logging_outputs)
-        if c_total > 1:
-            agg_output["qua_error"] = e_len * 100.0 / c_total
-            agg_output["uer"] = c_errors * 100.0 / c_total
-        # loss: per output token loss
-        # nll_loss: per sentence loss
+
+        if sample_size > 0: # training
+            agg_output = {
+                "loss": loss_sum / sample_size if sample_size > 0 else 0.0,
+                "ce_loss": ce_loss / sample_size if sample_size > 0 else 0.0,
+                "qua_loss": qua_loss / nsentences if nsentences > 0 else 0.0,
+                "e_len": e_len / nsentences if nsentences > 0 else 0.0,
+                "embedding_loss": embedding_loss / (sample_size * gold_rate) if (sample_size * gold_rate) > 0 else 0.0,
+                # if args.sentence_avg, then sample_size is nsentences, then loss
+                # is per-sentence loss; else sample_size is ntokens, the loss
+                # becomes per-output token loss
+                "gold_rate": gold_rate,
+                "ntokens": ntokens,
+                "nsentences": nsentences,
+                "sample_size": sample_size,
+                "acc": correct_sum * 100.0 / total_sum if total_sum > 0 else 0.0,
+                "correct": correct_sum,
+                "total": total_sum,
+                # total is the number of validate tokens
+            }
+        else:
+            c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
+            c_total = sum(log.get("c_total", 1) for log in logging_outputs)
+            agg_output = {
+                "uer": c_errors * 100.0 / c_total,
+                "qua_error": e_len * 100.0 / c_total,
+                "qua_loss": qua_loss / nsentences if nsentences > 0 else 0.0,
+                "gold_rate": gold_rate,
+                "ntokens": ntokens,
+                "nsentences": nsentences
+            }
+
         return agg_output
