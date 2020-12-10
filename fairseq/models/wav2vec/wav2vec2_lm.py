@@ -363,8 +363,13 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
         self.proj = Linear(encoder.d-1, bert.embeddings.word_embeddings.weight.size(1))
-        self.proj2 = Linear(encoder.d-1, len(tgt_dict))
+        # self.proj2 = Linear(encoder.d-1, len(tgt_dict))
         self.gold_rate_range = eval(args.gold_rate_range)
+
+        for p in self.to_vocab.parameters():
+            p.requires_grad = False
+        # for p in self.bert.embeddings.parameters():
+        #     p.requires_grad = False
 
     @staticmethod
     def add_args(parser):
@@ -406,6 +411,87 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
         """
         encoder_output = self.encoder(tbc=False, **kwargs)
         alphas = CIFFcModelV2.get_alphas(encoder_output)
+        input_ids = kwargs['bert_input'].long()
+        if self.training:
+            _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
+            padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
+            gold_rate = self.set_gold_rate()
+        else:
+            # _alphas, num_output = self.resize(alphas)
+            # padding_mask = ~utils.sequence_mask(torch.round(num_output).int()).bool()
+            _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
+            padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
+            gold_rate = 0.0
+
+        cif_outputs = self.cif(encoder_output['encoder_out'][:, :, :-1], _alphas)
+        hidden = self.proj(cif_outputs)
+        logits2 = self.to_vocab(hidden)
+
+        logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
+            hidden, padding_mask, input_ids, gold_rate)
+        # logits = GradMultiply.apply(logits, 0.1)
+
+        logits = logits2 + logits
+
+        return {'logits': logits, 'len_logits': kwargs['target_lengths'],
+                'alphas': alphas, 'num_output': num_output,
+                'embedding': hidden, 'gold_embedding': gold_embedding,
+                'pred_mask': pred_mask, 'token_mask': token_mask,
+                'gold_rate': gold_rate}
+
+    def bert_forward(self, hidden, padding_mask, input_ids, gold_rate=0.0):
+        """
+        """
+        device = hidden.device
+
+        token_mask = input_ids.ne(self.tgt_dict.cls()) * \
+                     input_ids.ne(self.tgt_dict.sep()) * \
+                     input_ids.ne(self.tgt_dict.pad())
+        gold_embedding = self.bert.embeddings.word_embeddings(input_ids)
+        pred_mask = (torch.rand(input_ids.size(), device=device) >= gold_rate) * token_mask
+        hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
+                                 F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
+                                 gold_embedding)
+
+        attention_mask = padding2attention_mask(padding_mask)
+
+        embeddings = self.bert.embeddings(inputs_embeds=hidden_mix)
+        encoder_outputs = self.bert.encoder(
+            embeddings,
+            attention_mask=attention_mask[:, None, None, :])
+
+        logits = self.to_vocab(encoder_outputs[0])
+        logits = logits[:, 1:-1, :]
+
+        return logits, gold_embedding, pred_mask, token_mask
+
+
+@register_model("wav2vec_cif2_bert_3")
+class W2V_MIX_CIF2_BERT_3(W2V_MIX_CIF2_BERT_2):
+
+    def __init__(self, args, encoder, bert, to_vocab, tgt_dict, tokenizer):
+        BaseFairseqModel.__init__(self)
+        self.encoder = encoder
+        self.bert = bert
+        self.to_vocab = to_vocab
+        self.tgt_dict = tgt_dict
+        self.tokenizer = tokenizer
+        self.num_updates = 0
+        self.args = args
+        self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
+        self.proj = Linear(encoder.d-1, bert.embeddings.word_embeddings.weight.size(1))
+        self.proj2 = Linear(encoder.d-1, len(tgt_dict))
+        self.gold_rate_range = eval(args.gold_rate_range)
+
+    def forward(self, **kwargs):
+        """
+        encoder_output= "encoder_out": x,
+                        "encoded": encoded,
+                        "encoder_padding_mask": padding_mask,  # B x T
+                        "padding_mask": padding_mask,
+        """
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        alphas = CIFFcModelV2.get_alphas(encoder_output)
         if self.training:
             _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
             padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
@@ -422,17 +508,105 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
 
         cif_outputs = self.cif(encoder_output['encoder_out'][:, :, :-1], _alphas)
         hidden = self.proj(cif_outputs)
-        logits2 = self.proj2(cif_outputs)
+        logits_ac = self.to_vocab(hidden)
 
-        logits, gold_embedding, pred_mask = self.bert_forward(
-            hidden, padding_mask, input_ids, gold_rate)
-        logits = GradMultiply.apply(logits, 0.1)
+        logits_lm, gold_embedding, pred_mask, token_mask = self.bert_forward(
+            hidden, logits_ac, padding_mask, input_ids, gold_rate)
+        # logits = GradMultiply.apply(logits, 0.1)
 
-        logits = logits2 + logits
+        logits = logits_ac + logits_lm
 
         return {'logits': logits, 'len_logits': kwargs['target_lengths'],
                 'alphas': alphas, 'num_output': num_output,
-                'embedding': hidden, 'gold_embedding': gold_embedding, 'pred_mask': pred_mask,
+                'embedding': hidden, 'gold_embedding': gold_embedding,
+                'pred_mask': pred_mask, 'token_mask': token_mask,
+                'gold_rate': gold_rate}
+
+    def bert_forward(self, hidden, logits_ac, padding_mask, input_ids=None, gold_rate=0.0, threash=0.8):
+        """
+        """
+        device = hidden.device
+
+        if input_ids is not None:  # train
+            token_mask = input_ids.ne(self.tgt_dict.cls()) * \
+                         input_ids.ne(self.tgt_dict.sep()) * \
+                         input_ids.ne(self.tgt_dict.pad())
+            gold_embedding = self.bert.embeddings.word_embeddings(input_ids)
+            pred_mask = (torch.rand(input_ids.size(), device=device) > gold_rate) * token_mask
+            hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
+                                     F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
+                                     gold_embedding)
+        else: # infer
+            gold_embedding = pred_mask = token_mask = None
+            probs = utils.softmax(logits_ac.float(), dim=-1)
+            confident = probs.max(-1) > threash
+            hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
+                                     F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
+                                     gold_embedding)
+
+            hidden_mix = F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0)
+
+        attention_mask = padding2attention_mask(padding_mask)
+
+        embeddings = self.bert.embeddings(inputs_embeds=hidden_mix)
+        encoder_outputs = self.bert.encoder(
+            embeddings,
+            attention_mask=attention_mask[:, None, None, :])
+
+        logits = self.to_vocab(encoder_outputs[0])
+        logits = logits[:, 1:-1, :]
+
+        return logits, gold_embedding, pred_mask, token_mask
+
+
+@register_model("wav2vec_ctc_cif2_bert")
+class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
+
+    @staticmethod
+    def add_args(parser):
+        add_common_args(parser)
+        add_cif_args(parser)
+        add_lm_args(parser)
+        parser.add_argument("--lambda-ctc", type=float, metavar="D", help="lambda-ctc")
+        parser.add_argument("--gold-updates", type=float, default=50000.0, metavar="D", help="gold-updates")
+
+    def forward(self, **kwargs):
+        """
+        encoder_output= "encoder_out": x,
+                        "encoded": encoded,
+                        "encoder_padding_mask": padding_mask,  # B x T
+                        "padding_mask": padding_mask,
+        """
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        logits_ctc = self.proj2(encoder_output['encoder_out'][:, :, :-1])
+        len_logits_ctc = (~encoder_output['padding_mask']).sum(-1).long()
+
+        alphas = CIFFcModelV2.get_alphas(encoder_output)
+        if self.training:
+            _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
+            padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
+            gold_rate = self.set_gold_rate()
+            input_ids = kwargs['bert_input'].long()
+        else:
+            # _alphas, num_output = self.resize(alphas)
+            # padding_mask = ~utils.sequence_mask(torch.round(num_output).int()).bool()
+            _alphas, num_output = self.resize(alphas, kwargs['target_lengths'])
+            # print(num_output, kwargs['target_lengths'])
+            padding_mask = ~utils.sequence_mask(kwargs['target_lengths']).bool()
+            input_ids = None
+            gold_rate = 0.0
+
+        cif_outputs = self.cif(encoder_output['encoder_out'][:, :, :-1], _alphas)
+        hidden = self.proj(cif_outputs)
+
+        logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
+            hidden, padding_mask, input_ids, gold_rate)
+        # logits = GradMultiply.apply(logits, 0.1)
+
+        return {'logits': logits, 'len_logits': kwargs['target_lengths'],
+                'alphas': alphas, 'num_output': num_output,
+                'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc,
+                'pred_mask': pred_mask, 'token_mask': token_mask,
                 'gold_rate': gold_rate}
 
     def bert_forward(self, hidden, padding_mask, input_ids=None, gold_rate=0.0):
@@ -450,7 +624,7 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
                                      F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
                                      gold_embedding)
         else:
-            gold_embedding = pred_mask = None
+            gold_embedding = pred_mask = token_mask = None
             hidden_mix = F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0)
 
         attention_mask = padding2attention_mask(padding_mask)
@@ -461,9 +635,24 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
             attention_mask=attention_mask[:, None, None, :])
 
         logits = self.to_vocab(encoder_outputs[0])
-        logits = logits[:, 1:-1, :] * (~padding_mask)[:, :, None]
+        logits = logits[:, 1:-1, :]
 
-        return logits, gold_embedding, pred_mask
+        return logits, gold_embedding, pred_mask, token_mask
+
+    def get_normalized_probs(self, net_output, log_probs):
+        """Get normalized probabilities (or log probs) from a net's output."""
+        logits_ctc = net_output["logits_ctc"]
+        logits = net_output["logits"]
+        if log_probs:
+            res_ctc = utils.log_softmax(logits_ctc.float(), dim=-1)
+            res = utils.log_softmax(logits.float(), dim=-1)
+        else:
+            res_ctc = utils.softmax(logits_ctc.float(), dim=-1)
+            res = utils.softmax(logits.float(), dim=-1)
+        res_ctc.batch_first = True
+        res.batch_first = True
+
+        return res_ctc, res
 
 
 @register_model_architecture("wav2vec_cif_bert", "wav2vec_cif_bert")
@@ -479,6 +668,12 @@ def w2v_cif_bert_architecture(args):
 
 
 @register_model_architecture("wav2vec_cif2_bert_2", "wav2vec_cif2_bert_2")
+def w2v_cif_bert_architecture(args):
+    cif_architecture(args)
+    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
+
+
+@register_model_architecture("wav2vec_ctc_cif2_bert", "wav2vec_ctc_cif2_bert")
 def w2v_cif_bert_architecture(args):
     cif_architecture(args)
     args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
