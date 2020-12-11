@@ -366,8 +366,8 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
         # self.proj2 = Linear(encoder.d-1, len(tgt_dict))
         self.gold_rate_range = eval(args.gold_rate_range)
 
-        for p in self.to_vocab.parameters():
-            p.requires_grad = False
+        # for p in self.to_vocab.parameters():
+        #     p.requires_grad = False
         # for p in self.bert.embeddings.parameters():
         #     p.requires_grad = False
 
@@ -429,7 +429,7 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
 
         logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
             hidden, padding_mask, input_ids, gold_rate)
-        # logits = GradMultiply.apply(logits, 0.1)
+        logits = GradMultiply.apply(logits, 0.1)
 
         logits = logits2 + logits
 
