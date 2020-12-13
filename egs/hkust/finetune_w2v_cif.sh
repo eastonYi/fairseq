@@ -20,4 +20,4 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --warmup-steps 5000 --hold-steps 20000 --decay-steps 30000 --final-lr-scale 0.05 \
 --final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \
 --attention-dropout 0.0 --max-tokens 1200000 --seed 2337 --ddp-backend no_c10d --update-freq 2 \
---log-interval 500 --log-format simple --save-interval 1
+--log-interval 1000 --log-format simple --save-interval 1
