@@ -316,10 +316,6 @@ class CIFFcModel(BaseFairseqModel):
             # num = num + noise * torch.rand(alphas.size(0)).to(device)
 
         # scaling
-
-        # if (torch.round(num) < 1).float().sum() > 0 or \
-        #    (torch.round(num_noise) < 1).float().sum() > 0:
-        #     import pdb; pdb.set_trace()
         _alphas = alphas * (num / _num)[:, None].repeat(1, alphas.size(1))
 
         # rm attention value that exceeds threashold
