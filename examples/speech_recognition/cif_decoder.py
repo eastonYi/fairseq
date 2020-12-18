@@ -42,7 +42,7 @@ class CIFDecoder(Seq2seqDecoder):
         """
         encoder_output = models[0].get_encoder_output(sample['net_input'])
         encoder_out = {
-            "encoder_out": encoder_output.encoder_out.transpose(0,1), # B x T x C
+            "encoder_out": encoder_output.encoder_out.transpose(0, 1), # B x T x C
             "padding_mask": encoder_output.encoder_padding_mask
         }
         alphas, _ = models[0].assigner(encoder_out)

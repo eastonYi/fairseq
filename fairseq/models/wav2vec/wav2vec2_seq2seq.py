@@ -311,7 +311,7 @@ class TransformerCTCShrinkModel(TransformerModel):
         encoded_shrunk_padding_mask = ~sequence_mask(len_decode, dtype=torch.bool)
 
         return EncoderOut(
-            encoder_out=encoded_shrunk.transpose(0,1),  # T x B x C
+            encoder_out=encoded_shrunk.transpose(0, 1),  # T x B x C
             encoder_embedding=None,
             encoder_padding_mask=encoded_shrunk_padding_mask,  # B x T
             encoder_states=None,
