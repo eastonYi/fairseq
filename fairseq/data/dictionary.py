@@ -426,6 +426,10 @@ class BertDictionary(Dictionary):
         """Helper to get index of unk symbol"""
         return self.index(self.unk_word)
 
+    def eos(self):
+        """Helper to get index of unk symbol"""
+        return self.index(self.unk_word)
+
     def cls(self):
         """Helper to get index of pad symbol"""
         return self.index(self.cls_word)

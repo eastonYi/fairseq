@@ -300,7 +300,7 @@ class CIFFcModel(BaseFairseqModel):
     #     return cif_outputs, not_padding_after_cif, sum_a
 
     @staticmethod
-    def resize(alphas, target_lengths=None, noise=0.2, threshold=THRESHOLD):
+    def resize(alphas, target_lengths, noise=0.4, threshold=THRESHOLD):
         """
         alpha in thresh=1.0 | (0.0, +0.21)
         target_lengths: if None, apply round and resize, else apply scaling
@@ -309,11 +309,8 @@ class CIFFcModel(BaseFairseqModel):
         # sum
         _num = alphas.sum(-1)
 
-        if target_lengths is None:
-            num = torch.round(alphas.sum(-1))
-        else:
-            num = target_lengths.float()
-            # num = num + noise * torch.rand(alphas.size(0)).to(device)
+        num = target_lengths.float()
+        num = num + noise * torch.rand(alphas.size(0)).to(device)
 
         # scaling
         _alphas = alphas * (num / _num)[:, None].repeat(1, alphas.size(1))

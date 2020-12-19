@@ -52,7 +52,7 @@ output units",
     parser.add_argument(
         "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm",
                                   "ctc_decoder", "seq2seq_decoder", "seq2seq_lm_decoder",
-                                  "cif_decoder", "cif_lm_decoder"],
+                                  "cif_decoder", "cif_lm_decoder", "cif_bert_decoder"],
         help="use a w2l decoder"
     )
     parser.add_argument("--lexicon", help="lexicon for w2l decoder")
@@ -331,6 +331,10 @@ def main(args, task=None, model_state=None):
             from examples.speech_recognition.cif_decoder import CIFDecoder
 
             return CIFDecoder(args, task.target_dictionary, ({}, {}))
+        elif w2l_decoder == "cif_bert_decoder":
+            from examples.speech_recognition.cif_bert_decoder import CIF_BERT_Decoder
+
+            return CIF_BERT_Decoder(args, task.target_dictionary)
         elif w2l_decoder == "seq2seq_decoder":
             from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
 
@@ -464,6 +468,7 @@ def make_parser():
     parser = options.get_generation_parser()
     parser = add_asr_eval_argument(parser)
     return parser
+
 
 def cli_main():
     parser = make_parser()

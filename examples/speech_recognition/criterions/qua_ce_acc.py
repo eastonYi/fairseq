@@ -669,13 +669,13 @@ class CTC_CIF_BERT(CIF_BERT):
             as net_output.
             We need to make a change to support all FairseqEncoder models.
         """
-        net_output = model(**sample["net_input"])
-        num_output = torch.round(net_output["num_output"]).int()
-        gold_rate = net_output["gold_rate"]
         nsentences = sample["target"].size(0)
         ntokens = sample["ntokens"]
 
         if model.training:
+            net_output = model(**sample["net_input"])
+            num_output = torch.round(net_output["num_output"]).int()
+            gold_rate = net_output["gold_rate"]
             sample_size = net_output["pred_mask"].float().sum()
             lprobs, targets, ctc_loss, qua_loss, ce_loss = self.compute_loss(
                 model, net_output, sample, reduction, log_probs
@@ -692,6 +692,9 @@ class CTC_CIF_BERT(CIF_BERT):
         else:
             import editdistance
 
+            net_output = model(**sample["net_input"])
+            num_output = torch.round(net_output["num_output"]).int()
+
             loss = sample_size = 0.0
             logging_output = {
                 "ntokens": ntokens,
@@ -705,16 +708,13 @@ class CTC_CIF_BERT(CIF_BERT):
                 for i, logits, l, t in zip(range(9999), net_output['logits'], num_output, sample["target"]):
                     # decoded = logits.argmax(dim=-1)[:l]
                     p = t != self.task.target_dictionary.pad()
-                    decoded = logits.argmax(dim=-1)[:int(p.sum(-1))]
+                    decoded = logits.argmax(dim=-1)[:l]
                     targ = t[p]
                     targ_units_arr = targ.tolist()
                     pred_units_arr = decoded.tolist()
-                    # targ_units_arr = targ.unique_consecutive().tolist()
-                    # pred_units_arr = decoded.unique_consecutive().tolist()
                     c_err += editdistance.eval(pred_units_arr, targ_units_arr)
                     c_len += len(targ_units_arr)
                     e_len += abs(len(targ_units_arr) - len(pred_units_arr)) * 1.0
-                    # import pdb; pdb.set_trace()
                 self.logits2sent(pred_units_arr, targ_units_arr, model.tgt_dict)
                 logging_output["c_errors"] = c_err
                 logging_output["c_total"] = c_len
