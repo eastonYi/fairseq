@@ -75,7 +75,7 @@ def add_lm_args(parser):
         "--gold-updates", type=float, default=50000.0, metavar="D", help="gold-updates"
     )
     parser.add_argument(
-        "--infer-threash", type=float, help="infer-threash"
+        "--infer-threash", type=float, default=0.8, help="infer-threash"
     )
     parser.add_argument(
         "--lm-path", type=str, help="dim-hidden-mixer"
@@ -84,13 +84,10 @@ def add_lm_args(parser):
         "--bert-name", type=str, metavar="D", help="bert_name"
     )
     parser.add_argument(
-        "--share-final-proj", action="store_true", help="share-final-proj"
-    )
-    parser.add_argument(
         "--lambda-embedding", type=float, metavar="D", help="lambda-embedding"
     )
     parser.add_argument(
-        "--lambda-lm", type=float, default=0.1, metavar="D", help="lambda-lm"
+        "--lambda-lm", type=float, default=0.2, metavar="D", help="lambda-lm"
     )
 
 
@@ -181,9 +178,6 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         else:
             input_ids = None
             gold_rate = 0.0
-
-        if cif_outputs.size(1) == 0:
-            import pdb; pdb.set_trace()
 
         bert_output, gold_embedding, pred_mask = self.forward_embeded(
             hidden, padding_mask, input_ids, gold_rate)
@@ -508,12 +502,9 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
         BaseFairseqModel.__init__(self)
         self.encoder = encoder
         self.bert = bert
-        self.to_vocab = to_vocab
-        if args.share_final_proj:
-            self.to_vocab_ac = to_vocab
-        else:
-            self.to_vocab_ac = copy.deepcopy(to_vocab)
-        self.to_vocab_ctc = copy.deepcopy(to_vocab) # 768 -> 21128
+        self.to_vocab = to_vocab # 768 -> 21128
+        self.to_vocab_ac = copy.deepcopy(to_vocab)
+        self.to_vocab_ctc = copy.deepcopy(to_vocab)
         self.proj = Linear(encoder.d-1, bert.embeddings.word_embeddings.weight.size(1))
         self.tgt_dict = tgt_dict
         self.tokenizer = tokenizer
@@ -540,14 +531,15 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
                         "padding_mask": padding_mask,
         """
         encoder_output = self.encoder(tbc=False, **kwargs)
-        logits_ctc = self.to_vocab_ctc(encoder_output['encoder_out'])
+        hidden_ctc = F.pad(encoder_output['encoder_out'][:, :, :-1], [0, 1, 0, 0, 0, 0], value=0)
+        logits_ctc = self.to_vocab_ctc(hidden_ctc)
         len_logits_ctc = (~encoder_output['padding_mask']).sum(-1).long()
         alphas = CIFFcModelV2.get_alphas(encoder_output)
         if self.training:
             input_ids = kwargs['bert_input'].long()
             gold_rate = self.set_gold_rate()
             decode_length = kwargs['target_lengths']
-            _alphas, num_output = self.resize(alphas, decode_length, noise=0.4)
+            _alphas, num_output = self.resize(alphas, decode_length, noise=0.0)
         else:
             input_ids = None
             gold_rate = 0.0
@@ -561,8 +553,11 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
 
         logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
             hidden, logits_ac, padding_mask, input_ids, gold_rate,
+            # threash=0.8)
             threash=self.args.infer_threash)
+        # logits = GradMultiply.apply(logits, 0.2)
         logits = logits_ac + self.args.lambda_lm * logits
+        # logits = logits_ac + 0.1 * logits
 
         return {'logits': logits, 'len_logits': decode_length,
                 'alphas': alphas, 'num_output': num_output,

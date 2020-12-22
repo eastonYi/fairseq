@@ -21,17 +21,48 @@ class CIF_BERT_Decoder(object):
         self.vocab_size = len(tgt_dict)
         self.nbest = args.nbest
 
+    # def generate(self, models, sample, **unused):
+    #     """Generate a batch of inferences."""
+    #     model = models[0]
+    #     model_output = model(**sample["net_input"])
+    #     logits = model_output['logits']
+    #     len_decoded = model_output['len_logits']
+    #
+    #     probs = utils.softmax(logits.float(), dim=-1)
+    #
+    #     res = []
+    #     for distribution, length in zip(probs, len_decoded):
+    #         result = distribution.argmax(-1)
+    #         score = 0.0
+    #         res.append([{'tokens': result[:length],
+    #                      "score": score}])
+    #
+    #     return res
+
     def generate(self, models, sample, **unused):
         """Generate a batch of inferences."""
         model = models[0]
-        model_output = model(**sample["net_input"])
-        logits = model_output['logits']
-        len_decoded = model_output['len_logits']
 
+        encoder_output = model.encoder(tbc=False, **sample["net_input"])
+        alphas = CIFFcModelV2.get_alphas(encoder_output)
+        decode_length = torch.round(alphas.sum(-1)).int()
+        _alphas, num_output = model.resize(alphas, decode_length, noise=0.0)
+
+        padding_mask = ~utils.sequence_mask(decode_length).bool()
+        cif_outputs = model.cif(encoder_output['encoder_out'][:, :, :-1], _alphas)
+        hidden = model.proj(cif_outputs)
+        logits_ac = model.to_vocab_ac(hidden)
+
+        for i in range(1):
+            logits, gold_embedding, pred_mask, token_mask = model.bert_forward(
+                hidden, logits_ac, padding_mask, None, 0.0,
+                # threash=0.8)
+                threash=model.args.infer_threash)
+            logits = logits_ac + model.args.lambda_lm * logits
         probs = utils.softmax(logits.float(), dim=-1)
 
         res = []
-        for distribution, length in zip(probs, len_decoded):
+        for distribution, length in zip(probs, decode_length):
             result = distribution.argmax(-1)
             score = 0.0
             res.append([{'tokens': result[:length],
