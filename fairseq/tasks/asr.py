@@ -241,7 +241,10 @@ class AudioCifBertTask(AudioCtcTask):
         dict_path = os.path.join(args.data, "vocab.txt")
         if not os.path.isfile(dict_path):
             raise FileNotFoundError("Dict not found: {}".format(dict_path))
-        tgt_dict = BertDictionary.load(dict_path)
+
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained(args.bert_name)
+        tgt_dict = BertDictionary.load(dict_path, tokenizer)
 
         print("| dictionary: {} types".format(len(tgt_dict)))
         return cls(args, tgt_dict)

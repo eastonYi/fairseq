@@ -94,13 +94,12 @@ def add_lm_args(parser):
 @register_model("wav2vec_cif_bert")
 class W2V_MIX_CIF_BERT(BaseFairseqModel):
 
-    def __init__(self, args, encoder, assigner, lm, tgt_dict, tokenizer):
+    def __init__(self, args, encoder, assigner, lm, tgt_dict):
         super().__init__()
         self.encoder = encoder
         self.assigner = assigner
         self.bert = lm
         self.tgt_dict = tgt_dict
-        self.tokenizer = tokenizer
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
@@ -127,13 +126,13 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         if not hasattr(args, "max_target_positions"):
             args.max_target_positions = 2048
 
-        lm, tokenizer = cls.build_bert(args)
+        lm = cls.build_bert(args)
         encoder = cls.build_encoder(args) # encoder
         assigner = cls.build_assigner(args, encoder.d)
 
         tgt_dict = task.target_dictionary
 
-        return cls(args, encoder, assigner, lm, tgt_dict, tokenizer)
+        return cls(args, encoder, assigner, lm, tgt_dict)
 
     @classmethod
     def build_encoder(cls, args, tgt_dict=None):
@@ -148,9 +147,8 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
         from transformers import BertModel, BertTokenizer
 
         bert = BertModel.from_pretrained(args.bert_name)
-        tokenizer = BertTokenizer.from_pretrained(args.bert_name)
 
-        return bert, tokenizer
+        return bert
 
     def forward(self, **kwargs):
         """
@@ -243,31 +241,15 @@ class W2V_MIX_CIF_BERT(BaseFairseqModel):
 
         return gold_rate
 
-    def index_convert(self, input_ids, padding_mask):
-        """
-        pad: 0, unk: 100
-        """
-        max_len = input_ids.size(1)
-        lengths = (~padding_mask).sum(-1)
-        list_sents = []
-        for sent_ids, length in zip(input_ids, lengths):
-            sent = self.tgt_dict.string(sent_ids[:length])
-            sent = sent.replace('<unk>', '`').replace('[NOISE]', '`').replace('[VOCALIZED-NOISE]', '`').replace('[LAUGHTER]', '`')
-            sent_ids_ = self.tokenizer(sent)['input_ids'][1:-1] + [0] * (max_len-length)
-            list_sents.append(sent_ids_)
-
-        return torch.tensor(list_sents).type_as(input_ids), padding_mask
-
 
 @register_model("wav2vec_cif2_bert")
 class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
 
-    def __init__(self, args, encoder, lm, tgt_dict, tokenizer):
+    def __init__(self, args, encoder, lm, tgt_dict):
         BaseFairseqModel.__init__(self)
         self.encoder = encoder
         self.bert = lm
         self.tgt_dict = tgt_dict
-        self.tokenizer = tokenizer
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
@@ -289,12 +271,12 @@ class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
         # make sure all arguments are present in older models
         w2v_cif_bert_architecture(args)
 
-        lm, tokenizer = cls.build_bert(args)
+        lm = cls.build_bert(args)
         encoder = cls.build_encoder(args) # encoder
 
         tgt_dict = task.target_dictionary
 
-        return cls(args, encoder, lm, tgt_dict, tokenizer)
+        return cls(args, encoder, lm, tgt_dict)
 
     def forward(self, **kwargs):
         """
@@ -366,13 +348,12 @@ class W2V_MIX_CIF2_BERT(W2V_MIX_CIF_BERT):
 @register_model("wav2vec_cif2_bert_2")
 class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
 
-    def __init__(self, args, encoder, bert, to_vocab, tgt_dict, tokenizer):
+    def __init__(self, args, encoder, bert, to_vocab, tgt_dict):
         BaseFairseqModel.__init__(self)
         self.encoder = encoder
         self.bert = bert
         self.to_vocab = to_vocab
         self.tgt_dict = tgt_dict
-        self.tokenizer = tokenizer
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
@@ -402,21 +383,20 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
         w2v_cif_bert_architecture(args)
         tgt_dict = task.target_dictionary
 
-        tokenizer, bert, to_vocab = cls.build_bert(args)
+        bert, to_vocab = cls.build_bert(args)
         encoder = cls.build_encoder(args) # encoder
 
-        return cls(args, encoder, bert, to_vocab, tgt_dict, tokenizer)
+        return cls(args, encoder, bert, to_vocab, tgt_dict)
 
     @classmethod
     def build_bert(cls, args):
-        from transformers import BertForMaskedLM, BertTokenizer
+        from transformers import BertForMaskedLM
 
-        tokenizer = BertTokenizer.from_pretrained(args.bert_name)
         pretrained_model = BertForMaskedLM.from_pretrained(args.bert_name)
         bert = pretrained_model.bert
         to_vocab = pretrained_model.cls
 
-        return tokenizer, bert, to_vocab
+        return bert, to_vocab
 
     def forward(self, **kwargs):
         """
@@ -495,7 +475,7 @@ class W2V_MIX_CIF2_BERT_2(W2V_MIX_CIF2_BERT):
 @register_model("wav2vec_ctc_cif2_bert")
 class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
 
-    def __init__(self, args, encoder, bert, to_vocab, tgt_dict, tokenizer):
+    def __init__(self, args, encoder, bert, to_vocab, tgt_dict):
         """
         .copy_() clone to_vocab
         """
@@ -507,7 +487,6 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
         self.to_vocab_ctc = copy.deepcopy(to_vocab)
         self.proj = Linear(encoder.d-1, bert.embeddings.word_embeddings.weight.size(1))
         self.tgt_dict = tgt_dict
-        self.tokenizer = tokenizer
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
@@ -553,11 +532,9 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
 
         logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
             hidden, logits_ac, padding_mask, input_ids, gold_rate,
-            # threash=0.8)
             threash=self.args.infer_threash)
         # logits = GradMultiply.apply(logits, 0.2)
         logits = logits_ac + self.args.lambda_lm * logits
-        # logits = logits_ac + 0.1 * logits
 
         return {'logits': logits, 'len_logits': decode_length,
                 'alphas': alphas, 'num_output': num_output,

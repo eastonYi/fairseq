@@ -371,13 +371,20 @@ class Dictionary(object):
 class BertDictionary(Dictionary):
     """A mapping from symbols to consecutive integers"""
 
-    def __init__(self):
+    def __init__(self, tokenizer):
         self.unk_word, self.pad_word = '[UNK]', '[PAD]'
         self.cls_word, self.sep_word = '[CLS]', '[SEP]'
         self.symbols = []
         self.count = []
         self.indices = {}
         self.nspecial = len(self.symbols)
+        self.tokenizer = tokenizer
+
+    @classmethod
+    def load(cls, f, tokenizer):
+        d = cls(tokenizer)
+        d.add_from_file(f)
+        return d
 
     def add_from_file(self, f):
         """
@@ -417,6 +424,14 @@ class BertDictionary(Dictionary):
                 raise ValueError(
                     "Incorrect dictionary format, expected '<token>'"
                 )
+
+    def encode_line(self, line, reverse_order=False, **unuse):
+        words = self.tokenizer(line)["input_ids"][1:-1]
+        if reverse_order:
+            words = list(reversed(words))
+        ids = torch.tensor(words, dtype=torch.long)
+
+        return ids
 
     def pad(self):
         """Helper to get index of pad symbol"""
