@@ -1,10 +1,10 @@
 gpu=$1
 label_type=char
 DATA_DIR=data/ma/bert_style_char
-BERT='bert-base-uncased'
+BERT='bert-base-chinese'
 data_name=test
-MODEL_PATH=exp/finetune_w2v_ctc_cif2_bert_base_ma_new_2/checkpoint_best.pt
-RESULT_DIR=exp/finetune_w2v_ctc_cif2_bert_base_ma_new_2/decode_callhome_ma_beam1
+MODEL_PATH=exp/finetune_w2v_ctc_cif2_bert_base_ma_new/checkpoint_best.pt
+RESULT_DIR=exp/finetune_w2v_ctc_cif2_bert_base_ma_new/decode_callhome_ma_beam1
 
 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu \
 python ../../examples/speech_recognition/infer.py $DATA_DIR \

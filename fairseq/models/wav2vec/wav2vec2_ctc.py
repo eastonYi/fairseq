@@ -265,7 +265,7 @@ class Wav2VecEncoder(FairseqEncoder):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
-    def forward(self, source, padding_mask, tbc=True, **kwargs):
+    def forward(self, source, padding_mask, tbc=False, **kwargs):
 
         w2v_args = {
             "source": source,
@@ -284,7 +284,7 @@ class Wav2VecEncoder(FairseqEncoder):
         encoded = self.final_dropout(x)
 
         if tbc:
-            encoded = encoded * (~padding_mask.transpose(0,1)).unsqueeze(-1)
+            encoded = encoded * (~padding_mask.transpose(0, 1)).unsqueeze(-1)
         else:
             encoded = encoded * (~padding_mask).unsqueeze(-1)
 
@@ -298,7 +298,7 @@ class Wav2VecEncoder(FairseqEncoder):
             x = self.proj(encoded)
 
             if tbc:
-                x = x * (~padding_mask.transpose(0,1)).unsqueeze(-1)
+                x = x * (~padding_mask.transpose(0, 1)).unsqueeze(-1)
             else:
                 x = x * (~padding_mask).unsqueeze(-1)
 

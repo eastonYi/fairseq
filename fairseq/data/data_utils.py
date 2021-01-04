@@ -265,7 +265,7 @@ def batch_by_size(
         return batch_fixed_shapes_fast(indices, num_tokens_fn, fixed_shapes_sorted)
 
 
-def post_process(sentence: str, symbol: str):
+def post_process(sentence: str, symbol=None):
     if symbol == "sentencepiece":
         sentence = sentence.replace(" ", "").replace("\u2581", " ").strip()
     elif symbol == 'wordpiece':
@@ -279,6 +279,7 @@ def post_process(sentence: str, symbol: str):
     elif symbol is not None and symbol != 'none':
         sentence = (sentence + " ").replace(symbol, "").rstrip()
     return sentence
+
 
 def compute_mask_indices(
         shape: Tuple[int, int],

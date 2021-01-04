@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import contextlib
 import torch
 import torch.nn.functional as F
 from typing import List, Tuple, Dict, Optional
@@ -66,7 +67,7 @@ def pred2bert_input(pred, token_mask, cls=101, sep=102):
 
 def add_lm_args(parser):
     parser.add_argument(
-        "--freeze-lm-finetune-updates", type=int, help="freeze_lm_finetune_updates"
+        "--freeze-lm-finetune-updates", type=int, default=100, help="freeze_lm_finetune_updates"
     )
     parser.add_argument(
         "--gold-rate-range", type=str, help="gold-rate-range"
@@ -530,9 +531,11 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
         hidden = self.proj(cif_outputs)
         logits_ac = self.to_vocab_ac(hidden)
 
-        logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
-            hidden, logits_ac, padding_mask, input_ids, gold_rate,
-            threash=self.args.infer_threash)
+        ft = self.freeze_lm_finetune_updates <= self.num_updates
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            logits, gold_embedding, pred_mask, token_mask = self.bert_forward(
+                hidden, logits_ac, padding_mask, input_ids, gold_rate,
+                threash=self.args.infer_threash)
         # logits = GradMultiply.apply(logits, 0.2)
         logits = logits_ac + self.args.lambda_lm * logits
 
@@ -550,7 +553,7 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
 
         return num_ctc_output
 
-    def get_normalized_probs(self, net_output, log_probs):
+    def get_normalized_probs(self, net_output, log_probs, retrun_ctc=False):
         """Get normalized probabilities (or log probs) from a net's output."""
         logits_ctc = net_output["logits_ctc"]
         logits = net_output["logits"]
@@ -563,30 +566,29 @@ class W2V_MIX_CTC_CIF2_BERT(W2V_MIX_CIF2_BERT_2):
         res_ctc.batch_first = True
         res.batch_first = True
 
-        return res_ctc, res
+        if retrun_ctc:
+            return res_ctc, res
+        else:
+            return res
 
 
 @register_model_architecture("wav2vec_cif_bert", "wav2vec_cif_bert")
 def w2v_cif_bert_architecture(args):
     cif_architecture(args)
-    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
 
 
 @register_model_architecture("wav2vec_cif2_bert", "wav2vec_cif2_bert")
 def w2v_cif_bert_architecture(args):
     cif_architecture(args)
-    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
 
 
 @register_model_architecture("wav2vec_cif2_bert_2", "wav2vec_cif2_bert_2")
 def w2v_cif_bert_architecture(args):
     cif_architecture(args)
-    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
     args.share_final_proj = getattr(args, "share_final_proj", False)
 
 
 @register_model_architecture("wav2vec_ctc_cif2_bert", "wav2vec_ctc_cif2_bert")
 def w2v_cif_bert_architecture(args):
     cif_architecture(args)
-    args.freeze_lm_finetune_updates = getattr(args, "freeze_lm_finetune_updates", 1000)
     args.share_final_proj = getattr(args, "share_final_proj", False)

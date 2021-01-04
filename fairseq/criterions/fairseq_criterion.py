@@ -27,7 +27,11 @@ class FairseqCriterion(_Loss):
 
     @classmethod
     def build_criterion(cls, args, task):
-        """Construct a criterion from command-line args."""
+        """Construct a criterion from command-line args.
+        odict_values([
+        <Parameter "task">, <Parameter "wer_args">,
+        <Parameter "zero_infinity">, <Parameter "sentence_avg">,
+        <Parameter "remove_bpe">])"""
         # Criterions can override this, but for convenience we also try
         # to automatically map argparse.Namespace keys to corresponding
         # arguments in the __init__.

@@ -1,5 +1,4 @@
 gpu=$1
-
 DATA_BIN=data/hkust_char_add_callhome_ma
 EXP_DIR=exp/transformerx4_hkust_char_add_callhome_ma
 

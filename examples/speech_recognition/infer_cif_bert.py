@@ -10,7 +10,6 @@ Run inference for pre-processed data with a trained model.
 
 import editdistance
 import logging
-import math
 import os
 import sys
 
@@ -19,7 +18,7 @@ import torch
 from fairseq import checkpoint_utils, options, progress_bar, utils, tasks
 from fairseq.logging.meters import StopwatchMeter, TimeMeter
 from fairseq.data.data_utils import post_process
-from examples import speech_recognition
+from examples.speech_recognition.cif_bert_decoder import CIF_BERT_Decoder
 
 
 logging.basicConfig()
@@ -29,69 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 def add_asr_eval_argument(parser):
-    parser.add_argument("--kspmodel", default=None, help="sentence piece model")
-    parser.add_argument(
-        "--wfstlm", default=None, help="wfstlm on dictonary output units"
-    )
-    parser.add_argument(
-        "--rnnt_decoding_type",
-        default="greedy",
-        help="wfstlm on dictonary\
-output units",
-    )
-    parser.add_argument(
-        "--lm-weight",
-        "--lm_weight",
-        type=float,
-        default=0.2,
-        help="weight for lm while interpolating with neural score",
-    )
-    parser.add_argument(
-        "--rnnt_len_penalty", default=-0.5, help="rnnt length penalty on word level"
-    )
-    parser.add_argument(
-        "--w2l-decoder", choices=["viterbi", "kenlm", "fairseqlm",
-                                  "ctc_decoder", "seq2seq_decoder", "seq2seq_lm_decoder",
-                                  "cif_decoder", "cif_lm_decoder", "cif_bert_decoder"],
-        help="use a w2l decoder"
-    )
-    parser.add_argument("--lexicon", help="lexicon for w2l decoder")
-    parser.add_argument("--bert-name", default=None, help="bert-name")
+    parser.add_argument("--lm_weight", type=float, default=0.2,
+                        help="weight for lm while interpolating with neural score")
     parser.add_argument("--iscn", action='store_true', help="output char")
-    parser.add_argument("--unit-lm", action='store_true', help="if using a unit lm")
-    parser.add_argument("--kenlm-model", "--lm-model", help="lm model for w2l decoder")
-    parser.add_argument("--beam-threshold", type=float, default=25.0)
-    parser.add_argument("--beam-size-token", type=float, default=100)
-    parser.add_argument("--word-score", type=float, default=1.0)
-    parser.add_argument("--unk-weight", type=float, default=-math.inf)
-    parser.add_argument("--sil-weight", type=float, default=0.0)
-    parser.add_argument(
-        "--dump-emissions",
-        type=str,
-        default=None,
-        help="if present, dumps emissions into this file and exits",
-    )
-    parser.add_argument(
-        "--dump-features",
-        type=str,
-        default=None,
-        help="if present, dumps features into this file and exits",
-    )
-    parser.add_argument(
-        "--load-emissions",
-        type=str,
-        default=None,
-        help="if present, loads emissions from this file",
-    )
+    parser.add_argument("--infer-threshold", type=float, default=None)
+
     return parser
 
 
 def check_args(args):
-    # assert args.path is not None, "--path required for generation!"
-    # assert args.results_path is not None, "--results_path required for generation!"
-    assert (
-            not args.sampling or args.nbest == args.beam
-    ), "--sampling requires --nbest to be equal to --beam"
     assert (
             args.replace_unk is None or args.raw_text
     ), "--replace-unk requires a raw text dataset (--raw-text)"
@@ -115,7 +60,7 @@ def get_dataset_itr(args, task, models):
 def process_predictions(
         args, hypos, sp, tgt_dict, target_tokens, res_files, speaker, id, trans
 ):
-    for hypo in hypos[: min(len(hypos), args.nbest)]:
+    for hypo in hypos[: min(len(hypos), 1)]:
         hyp_words = []
 
         if "words" in hypo:
@@ -125,7 +70,7 @@ def process_predictions(
                     continue
                 hyp_words.append(hyp_word)
         else:
-            hyp_pieces = tgt_dict.string(hypo["tokens"].int().cpu())
+            hyp_pieces = tgt_dict.tokenizer.decode(hypo["tokens"].int().cpu())
             for hypo_chr in hyp_pieces.split():
                 if '[' not in hypo_chr and '<' not in hypo_chr:
                     hyp_words.append(hypo_chr)
@@ -135,7 +80,7 @@ def process_predictions(
                 tgt_words.append(tgt_word)
 
         tgt_words = ' '.join(tgt_words)
-        hyp_words = post_process(' '.join(hyp_words), args.remove_bpe)
+        hyp_words = post_process(' '.join(hyp_words))
 
         if args.iscn:
             hyp_words = ' '.join(list(hyp_words.replace(' ', '')))
@@ -282,23 +227,15 @@ def main(args, task=None, model_state=None):
 
     # Load ensemble
 
-    if args.load_emissions:
-        models, criterions = [], []
-    else:
-        logger.info("| loading model(s) from {}".format(args.path))
-        models, criterions, _ = load_models_and_criterions(
-            args.path,
-            data_path=args.data,
-            arg_overrides=eval(args.model_overrides),  # noqa
-            task=task,
-            model_state=model_state,
-        )
-        optimize_models(args, use_cuda, models)
-
-    # hack to pass transitions to W2lDecoder
-    if args.criterion == "asg_loss":
-        trans = criterions[0].asg.trans.data
-        args.asg_transitions = torch.flatten(trans).tolist()
+    logger.info("| loading model(s) from {}".format(args.path))
+    models, criterions, _ = load_models_and_criterions(
+        args.path,
+        data_path=args.data,
+        arg_overrides=eval(args.model_overrides),  # noqa
+        task=task,
+        model_state=model_state,
+    )
+    optimize_models(args, use_cuda, models)
 
     # Load dataset (possibly sharded)
     itr = get_dataset_itr(args, task, models)
@@ -306,78 +243,14 @@ def main(args, task=None, model_state=None):
     # Initialize generator
     gen_timer = StopwatchMeter()
 
-    def build_generator(args):
-        w2l_decoder = getattr(args, "w2l_decoder", None)
-        if w2l_decoder == "viterbi":
-            from examples.speech_recognition.w2l_decoder import W2lViterbiDecoder
-
-            return W2lViterbiDecoder(args, task.target_dictionary)
-        elif w2l_decoder == "kenlm":
-            from examples.speech_recognition.w2l_decoder import W2lKenLMDecoder
-
-            return W2lKenLMDecoder(args, task.target_dictionary)
-        elif w2l_decoder == "fairseqlm":
-            from examples.speech_recognition.w2l_decoder import W2lFairseqLMDecoder
-
-            return W2lFairseqLMDecoder(args, task.target_dictionary)
-        elif w2l_decoder == "ctc_decoder":
-            from examples.speech_recognition.ctc_decoder import CTCDecoder
-
-            return CTCDecoder(args, task.target_dictionary)
-        elif w2l_decoder == "cif_decoder":
-            from examples.speech_recognition.cif_decoder import CIFDecoder
-
-            return CIFDecoder(args, task.target_dictionary, {})
-        elif w2l_decoder == "cif_lm_decoder":
-            from examples.speech_recognition.cif_decoder import CIFDecoder
-
-            return CIFDecoder(args, task.target_dictionary, ({}, {}))
-        elif w2l_decoder == "cif_bert_decoder":
-            from examples.speech_recognition.cif_bert_decoder import CIF_BERT_Decoder
-
-            return CIF_BERT_Decoder(args, task.target_dictionary)
-        elif w2l_decoder == "seq2seq_decoder":
-            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
-
-            return Seq2seqDecoder(args, task.target_dictionary, {})
-        elif w2l_decoder == "seq2seq_lm_decoder":
-            from examples.speech_recognition.seq2seq_decoder import Seq2seqDecoder
-
-            return Seq2seqDecoder(args, task.target_dictionary, ({}, {}))
-        else:
-            return super().build_generator(args)
-
-    generator = build_generator(args)
-
-    if args.load_emissions:
-        generator = ExistingEmissionsDecoder(
-            generator, np.load(args.load_emissions, allow_pickle=True)
-        )
-        logger.info("loaded emissions from " + args.load_emissions)
+    generator = CIF_BERT_Decoder(args, task.target_dictionary)
 
     num_sentences = 0
 
     if args.results_path is not None and not os.path.exists(args.results_path):
         os.makedirs(args.results_path)
 
-    max_source_pos = (
-        utils.resolve_max_positions(
-            task.max_positions(), *[model.max_positions() for model in models]
-        ),
-    )
-
-    if max_source_pos is not None:
-        max_source_pos = max_source_pos[0]
-        if max_source_pos is not None:
-            max_source_pos = max_source_pos[0] - 1
-
-    if args.dump_emissions:
-        emissions = {}
-    if args.dump_features:
-        features = {}
-        models[0].bert.proj = None
-    else:
-        res_files = prepare_result_files(args)
+    res_files = prepare_result_files(args)
     errs_t = 0
     lengths_t = 0
     with progress_bar.build_progress_bar(args, itr) as t:
@@ -392,23 +265,6 @@ def main(args, task=None, model_state=None):
                 prefix_tokens = sample["target"][:, : args.prefix_size]
 
             gen_timer.start()
-            if args.dump_emissions:
-                with torch.no_grad():
-                    encoder_out = models[0](**sample["net_input"])
-                    emm = models[0].get_normalized_probs(encoder_out, log_probs=True)
-                    emm = emm.transpose(0, 1).cpu().numpy()
-                    for i, id in enumerate(sample["id"]):
-                        emissions[id.item()] = emm[i]
-                    continue
-            elif args.dump_features:
-                with torch.no_grad():
-                    encoder_out = models[0](**sample["net_input"])
-                    feat = encoder_out["encoder_out"].transpose(0, 1).cpu().numpy()
-                    for i, id in enumerate(sample["id"]):
-                        padding = encoder_out["encoder_padding_mask"][i].cpu().numpy() \
-                        if encoder_out["encoder_padding_mask"] is not None else None
-                        features[id.item()] = (feat[i], padding)
-                    continue
             hypos = task.inference_step(generator, models, sample, prefix_tokens)
             num_generated_tokens = sum(len(h[0]["tokens"]) for h in hypos)
             gen_timer.stop(num_generated_tokens)
@@ -434,34 +290,23 @@ def main(args, task=None, model_state=None):
             num_sentences += sample["nsentences"] if "nsentences" in sample else sample["id"].numel()
 
     wer = None
-    if args.dump_emissions:
-        emm_arr = []
-        for i in range(len(emissions)):
-            emm_arr.append(emissions[i])
-        np.save(args.dump_emissions, emm_arr)
-        logger.info(f"saved {len(emissions)} emissions to {args.dump_emissions}")
-    elif args.dump_features:
-        feat_arr = []
-        for i in range(len(features)):
-            feat_arr.append(features[i])
-        np.save(args.dump_features, feat_arr)
-        logger.info(f"saved {len(features)} emissions to {args.dump_features}")
-    else:
-        if lengths_t > 0:
-            wer = errs_t * 100.0 / lengths_t
-            logger.info(f"WER: {wer}")
 
-        logger.info(
-            "| Processed {} sentences ({} tokens) in {:.1f}s ({:.2f}"
-            "sentences/s, {:.2f} tokens/s)".format(
-                num_sentences,
-                gen_timer.n,
-                gen_timer.sum,
-                num_sentences / gen_timer.sum,
-                1.0 / gen_timer.avg,
-                )
-        )
-        logger.info("| Generate {} with beam={}".format(args.gen_subset, args.beam))
+    if lengths_t > 0:
+        wer = errs_t * 100.0 / lengths_t
+        logger.info(f"WER: {wer}")
+
+    logger.info(
+        "| Processed {} sentences ({} tokens) in {:.1f}s ({:.2f}"
+        "sentences/s, {:.2f} tokens/s)".format(
+            num_sentences,
+            gen_timer.n,
+            gen_timer.sum,
+            num_sentences / gen_timer.sum,
+            1.0 / gen_timer.avg,
+            )
+    )
+    logger.info("| Generate {} with beam={}".format(args.gen_subset, args.beam))
+
     return task, wer
 
 

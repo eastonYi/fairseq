@@ -37,7 +37,7 @@ class CtcCeCriterion(FairseqCriterion):
                 default="letter",
                 help="remove BPE tokens before scoring (can be set to sentencepiece, letter, and more)",
             )
-        except:
+        except RuntimeError:
             pass  # this option might have been added from eval args
 
     def forward(self, model, sample, reduce=True):
@@ -128,15 +128,12 @@ class CtcCeCriterion(FairseqCriterion):
         """
         target: without sos eos
         """
-        if getattr(lprobs, "batch_first", True):
-            lprobs = lprobs.transpose(0, 1) # T x B x V
-
         pad_mask = (target != self.pad_idx) & (target != self.eos_idx)
         targets_flat = target.masked_select(pad_mask)
 
         with torch.backends.cudnn.flags(enabled=False):
             loss = F.ctc_loss(
-                lprobs,
+                lprobs.transpose(0, 1), # T x B x V
                 targets_flat,
                 len_lprobs,
                 target_lengths,

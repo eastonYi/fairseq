@@ -20,6 +20,7 @@ class CIF_BERT_Decoder(object):
         self.tgt_dict = tgt_dict
         self.vocab_size = len(tgt_dict)
         self.nbest = args.nbest
+        self.infer_threshold = args.infer_threshold
 
     # def generate(self, models, sample, **unused):
     #     """Generate a batch of inferences."""
@@ -53,11 +54,12 @@ class CIF_BERT_Decoder(object):
         hidden = model.proj(cif_outputs)
         logits_ac = model.to_vocab_ac(hidden)
 
+        infer_threash = self.infer_threshold if self.infer_threshold else model.args.infer_threash
         for i in range(1):
             logits, gold_embedding, pred_mask, token_mask = model.bert_forward(
                 hidden, logits_ac, padding_mask, None, 0.0,
                 # threash=0.8)
-                threash=model.args.infer_threash)
+                threash=infer_threash)
             logits = logits_ac + model.args.lambda_lm * logits
         probs = utils.softmax(logits.float(), dim=-1)
 

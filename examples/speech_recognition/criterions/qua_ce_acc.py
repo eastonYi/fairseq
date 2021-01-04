@@ -501,13 +501,11 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
                     targ = t[p]
                     targ_units_arr = targ.tolist()
                     pred_units_arr = decoded.tolist()
-                    # targ_units_arr = targ.unique_consecutive().tolist()
-                    # pred_units_arr = decoded.unique_consecutive().tolist()
                     c_err += editdistance.eval(pred_units_arr, targ_units_arr)
                     c_len += len(targ_units_arr)
                     e_len += abs(len(targ_units_arr) - len(pred_units_arr)) * 1.0
                     # import pdb; pdb.set_trace()
-                self.logits2sent(pred_units_arr, targ_units_arr, model.tgt_dict)
+                self.logits2sent(pred_units_arr, targ_units_arr, self.task.target_dictionary)
                 logging_output["c_errors"] = c_err
                 logging_output["c_total"] = c_len
                 logging_output["e_len"] = e_len
@@ -515,10 +513,10 @@ class CIF_BERT(QuantityCrossEntropyWithAccCriterionV2):
         return loss, sample_size, logging_output
 
     @staticmethod
-    def logits2sent(preds, targets, vocab):
+    def logits2sent(preds, targets, dictionary):
         if random.random() < 0.03:
-            pred = ' '.join(vocab[i] for i in preds)
-            target = ' '.join(vocab[i] for i in targets)
+            pred = dictionary.tokenizer.decode(preds)
+            target = dictionary.tokenizer.decode(targets)
             print('pred:\n{}\ntarget:\n{}\n'.format(pred, target))
 
     @staticmethod
@@ -583,11 +581,7 @@ class CTC_CIF_BERT(CIF_BERT):
 
         # N, T -> N * T
         target = sample["target"].view(-1)
-        lprobs_ctc, lprobs = model.get_normalized_probs(net_output, log_probs=log_probs)
-
-        batch_first = getattr(lprobs, "batch_first", True)
-        if not batch_first:
-            lprobs = lprobs.transpose(0, 1)
+        lprobs_ctc, lprobs = model.get_normalized_probs(net_output, retrun_ctc=True, log_probs=log_probs)
 
         lprobs = lprobs.view(-1, lprobs.size(-1))
         # N, T, D -> N * T, D

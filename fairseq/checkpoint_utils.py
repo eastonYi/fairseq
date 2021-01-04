@@ -98,14 +98,14 @@ def save_checkpoint(args, trainer, epoch_itr, val_loss):
         checkpoints = checkpoint_paths(
             args.save_dir, pattern=r"checkpoint_\d+_(\d+)\.pt"
         )
-        for old_chk in checkpoints[args.keep_interval_updates :]:
+        for old_chk in checkpoints[args.keep_interval_updates:]:
             if os.path.lexists(old_chk):
                 os.remove(old_chk)
 
     if args.keep_last_epochs > 0:
         # remove old epoch checkpoints; checkpoints are sorted in descending order
         checkpoints = checkpoint_paths(args.save_dir, pattern=r"checkpoint(\d+)\.pt")
-        for old_chk in checkpoints[args.keep_last_epochs :]:
+        for old_chk in checkpoints[args.keep_last_epochs:]:
             if os.path.lexists(old_chk):
                 os.remove(old_chk)
 

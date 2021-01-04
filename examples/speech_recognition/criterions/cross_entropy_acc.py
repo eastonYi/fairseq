@@ -358,7 +358,7 @@ class CTCLabelSmoothedCrossEntropyWithAccCriterion(LabelSmoothedCrossEntropyWith
         ctc_logits = encoder_output['encoder_out']
         len_ctc_logits = (~encoder_output['encoder_padding_mask']).long().sum(-1)
         encoder_output = EncoderOut(
-            encoder_out=encoder_output['encoded'].transpose(0,1),  # T x B x C
+            encoder_out=encoder_output['encoded'].transpose(0, 1),  # T x B x C
             encoder_embedding=None,
             encoder_padding_mask=encoder_output['encoder_padding_mask'],  # B x T
             encoder_states=None,

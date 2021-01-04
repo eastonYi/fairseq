@@ -31,10 +31,9 @@ try:
         LMState,
         SmearingMode,
         Trie,
-        LexiconDecoder,
-        LexiconFreeDecoder,
+        LexiconDecoder
     )
-except:
+except FileNotFoundError:
     warnings.warn(
         "wav2letter python bindings are required to use this functionality. Please install from https://github.com/facebookresearch/wav2letter/wiki/Python-bindings"
     )
@@ -54,13 +53,15 @@ class W2lDecoder(object):
             self.blank = (
                 tgt_dict.index("<ctc_blank>")
                 if "<ctc_blank>" in tgt_dict.indices
-                else tgt_dict.bos()
+                else 1
+                # else tgt_dict.eos()
             )
             self.asg_transitions = None
         elif args.criterion == "asg_loss":
             self.criterion_type = CriterionType.ASG
             self.blank = -1
-            self.asg_transitions = args.asg_transitions
+            # self.asg_transitions = args.asg_transitions
+            self.asg_transitions = [1.0] * self.vocab_size ** 2
             self.max_replabel = args.max_replabel
             assert len(self.asg_transitions) == self.vocab_size ** 2
         else:
@@ -82,9 +83,12 @@ class W2lDecoder(object):
         encoder_out = models[0](**encoder_input)
         if self.criterion_type == CriterionType.CTC:
             emissions = models[0].get_normalized_probs(encoder_out, log_probs=True)
+            # encoder_out['logits']
         elif self.criterion_type == CriterionType.ASG:
-            emissions = encoder_out["encoder_out"]
-        return emissions.transpose(0, 1).float().cpu().contiguous()
+            # emissions = models[0].get_normalized_probs(encoder_out, log_probs=True)
+            emissions = encoder_out["logits"]
+
+        return emissions.float().cpu().contiguous()
 
     def get_tokens(self, idxs):
         """Normalize tokens by handling CTC blank, ASG replabels, etc."""
@@ -132,7 +136,7 @@ class W2lKenLMDecoder(W2lDecoder):
         self.silence = (
             tgt_dict.index("<ctc_blank>")
             if "<ctc_blank>" in tgt_dict.indices
-            else tgt_dict.bos()
+            else tgt_dict.eos()
         )
         self.lexicon = load_words(args.lexicon)
         self.word_dict = create_word_dict(self.lexicon)
@@ -147,9 +151,9 @@ class W2lKenLMDecoder(W2lDecoder):
             _, score = self.lm.score(start_state, word_idx)
             for spelling in spellings:
                 spelling_idxs = [tgt_dict.index(token) for token in spelling]
-                assert (
-                    tgt_dict.unk() not in spelling_idxs
-                ), f"{spelling} {spelling_idxs}"
+                # assert (
+                #     tgt_dict.unk() not in spelling_idxs
+                # ), f"{spelling} {spelling_idxs}"
                 self.trie.insert(spelling_idxs, word_idx, score)
         self.trie.smear(SmearingMode.MAX)
 
@@ -338,7 +342,8 @@ class W2lFairseqLMDecoder(W2lDecoder):
     def __init__(self, args, tgt_dict):
         super().__init__(args, tgt_dict)
 
-        self.silence = tgt_dict.bos()
+        # self.silence = tgt_dict.bos()
+        self.silence = 1
 
         self.unit_lm = getattr(args, "unit_lm", False)
 
@@ -349,6 +354,8 @@ class W2lFairseqLMDecoder(W2lDecoder):
         lm_args = checkpoint["args"]
         lm_args.data = osp.dirname(args.kenlm_model)
         print(lm_args)
+        # import pdb; pdb.set_trace()
+        # lm_args.data = ''
         task = tasks.setup_task(lm_args)
         model = task.build_model(lm_args)
         model.load_state_dict(checkpoint["model"], strict=False)
@@ -383,11 +390,14 @@ class W2lFairseqLMDecoder(W2lDecoder):
                     word_idx = self.word_dict.index(word)
                     _, score = self.lm.score(start_state, word_idx, no_cache=True)
 
+                # spellings (rightside in lexicon) should nor be unk
                 for spelling in spellings:
                     spelling_idxs = [tgt_dict.index(token) for token in spelling]
+                    # if tgt_dict.unk() in spelling_idxs:
+                    #     print(spelling)
                     assert (
                         tgt_dict.unk() not in spelling_idxs
-                    ), f"{spelling} {spelling_idxs}"
+                    ), f"{spelling} is unk: {spelling_idxs} for acoustic output"
                     self.trie.insert(spelling_idxs, word_idx, score)
             self.trie.smear(SmearingMode.MAX)
 
@@ -401,10 +411,10 @@ class W2lFairseqLMDecoder(W2lDecoder):
                 [],
                 self.unit_lm,
             )
-        else:
-            self.decoder = LexiconFreeDecoder(
-                self.decoder_opts, self.lm, self.silence, self.blank, []
-            )
+        # else:
+        #     self.decoder = LexiconFreeDecoder(
+        #         self.decoder_opts, self.lm, self.silence, self.blank, []
+        #     )
 
     def decode(self, emissions):
         B, T, N = emissions.size()

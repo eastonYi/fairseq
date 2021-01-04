@@ -235,6 +235,18 @@ class AudioCifTask(AudioCtcTask):
 @register_task("audio_cif_bert")
 class AudioCifBertTask(AudioCtcTask):
 
+    @staticmethod
+    def add_args(parser):
+        parser.add_argument(
+            "--labels",
+            type=str,
+            help="extension of the label file to load, if any",
+        )
+        parser.add_argument(
+            "--bert-name", type=str, metavar="D", help="bert_name"
+        )
+        AudioUnsuperviseTrainingTask.add_args(parser)
+
     @classmethod
     def setup_task(cls, args, **kwargs):
         """Setup the task (e.g., load google bert dictionaries)."""
