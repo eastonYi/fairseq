@@ -1,11 +1,15 @@
 . ../path.sh
 
 gpu=$1
-lm_weight=0.0
-word_score=0.1
+lm_weight=1.6
+word_score=0.4
+# lm_weight=1.6
+# word_score=0.4
 label_type=word
-DATA_DIR=data/test_clean
-data_name=test_clean
+# DATA_DIR=data/test_clean
+# data_name=test_clean
+DATA_DIR=../callhome_new/data/test_en
+data_name=test
 BERT='bert-base-uncased'
 lexicon=data/lexicon.txt
 lm=data/5-gram.word.bin

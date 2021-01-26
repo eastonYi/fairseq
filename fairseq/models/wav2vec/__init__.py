@@ -10,6 +10,7 @@ from .wav2vec2_ctc import *  # noqa
 # from .wav2vec2_ctc_lm import * #noqa
 from .wav2vec2_cif import * #noqa
 from .wav2vec2_cif_bert import * #noqa
+from .wav2vec2_cif_gpt2 import * #noqa
 # from .wav2vec2_semi import *  # noqa
 # from .wav2vec2_v1 import *  # noqa
 # from .wav2vec2_v2 import *  # noqa

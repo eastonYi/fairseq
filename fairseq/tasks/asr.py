@@ -7,7 +7,7 @@
 
 import os
 
-from fairseq.data import Dictionary, BertDictionary, AddTargetDataset, FileAudioDataset
+from fairseq.data import Dictionary, BertDictionary, GPT2Dictionary, AddTargetDataset, FileAudioDataset
 from .audio_pretraining import AudioUnsuperviseTrainingTask
 from . import register_task
 
@@ -257,7 +257,6 @@ class AudioCifBertTask(AudioCtcTask):
         from transformers import BertTokenizer
         tokenizer = BertTokenizer.from_pretrained(args.bert_name)
         tgt_dict = BertDictionary.load(dict_path, tokenizer)
-
         print("| dictionary: {} types".format(len(tgt_dict)))
         return cls(args, tgt_dict)
 
@@ -376,6 +375,66 @@ class AudioCtcCeTask(AudioCtcTask):
             labels,
             bos=self.dictionary.eos(),
             pad=self.dictionary.pad(),
+            eos=None,
+            batch_targets=True,
+            process_label=process_label
+        )
+
+
+@register_task("audio_cif_gpt2")
+class AudioCifGPT2Task(AudioCtcTask):
+
+    @staticmethod
+    def add_args(parser):
+        parser.add_argument(
+            "--labels",
+            type=str,
+            help="extension of the label file to load, if any",
+        )
+        parser.add_argument(
+            "--gpt2-name", type=str, metavar="D", help="gpt2_name"
+        )
+        AudioUnsuperviseTrainingTask.add_args(parser)
+
+    @classmethod
+    def setup_task(cls, args, **kwargs):
+        """Setup the task (e.g., load google bert dictionaries)."""
+        dict_path = os.path.join(args.data, "vocab.txt")
+        if not os.path.isfile(dict_path):
+            raise FileNotFoundError("Dict not found: {}".format(dict_path))
+
+        from transformers import GPT2Tokenizer
+        tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2_name)
+        tgt_dict = GPT2Dictionary.load(dict_path, tokenizer)
+        print("dictionary: {} types".format(len(tgt_dict)))
+        return cls(args, tgt_dict)
+
+    def load_dataset(self, split, **kwargs):
+        """Load a given dataset split.
+
+        Args:
+            split (str): name of the split (e.g., train, valid, test)
+        """
+        manifest = os.path.join(self.args.data, "{}.tsv".format(split))
+        self.datasets[split] = FileAudioDataset(
+            manifest,
+            sample_rate=self.args.sample_rate,
+            max_sample_size=self.args.max_sample_size,
+            min_sample_size=self.args.max_sample_size,
+            min_length=self.args.min_sample_size,
+            pad=True,
+            normalize=self.args.normalize,
+        )
+
+        label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
+        labels = self.load_labels(label_path)
+        process_label = LabelEncoder(self.dictionary)
+        import pdb; pdb.set_trace()
+        self.datasets[split] = AddTargetDataset(
+            self.datasets[split],
+            labels,
+            pad=self.dictionary.pad(),
+            bos=None,
             eos=None,
             batch_targets=True,
             process_label=process_label

@@ -63,6 +63,12 @@ class AddTargetDataset(BaseWrapperDataset):
             collated["net_input"]["bert_input"] = \
                 data_utils.collate_tokens(bert_input, pad_idx=self.pad, left_pad=False)
 
+        elif self.bos is None and self.eos is None and self.pad == 100: # GPT2:
+            target = [s["label"] for s in samples if s["id"] in indices]
+            gpt2_input = [s["label"] for s in samples if s["id"] in indices]
+            collated["net_input"]["gpt2_input"] = \
+                data_utils.collate_tokens(gpt2_input, pad_idx=self.pad, left_pad=False)
+
         elif self.bos is not None and self.eos is not None and self.pad == 1: # seq2seq
             eos = torch.ones([1]).int() * self.eos
             target = [torch.cat([s["label"], eos], dim=-1) for s in samples if s["id"] in indices]

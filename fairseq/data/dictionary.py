@@ -454,6 +454,79 @@ class BertDictionary(Dictionary):
         return self.index(self.sep_word)
 
 
+class GPT2Dictionary(Dictionary):
+    """A mapping from symbols to consecutive integers"""
+
+    def __init__(self, tokenizer):
+        self.pad_word, self.unk_word = '§', '¨' # index 100, 101
+        self.symbols = []
+        self.count = []
+        self.indices = {}
+        self.nspecial = len(self.symbols)
+        self.tokenizer = tokenizer
+
+    @classmethod
+    def load(cls, f, tokenizer):
+        d = cls(tokenizer)
+        d.add_from_file(f)
+        return d
+
+    def add_from_file(self, f):
+        """
+        Loads a pre-existing dictionary from a text file and adds its symbols
+        to this instance.
+        """
+        if isinstance(f, str):
+            try:
+                with PathManager.open(f, "r", encoding="utf-8") as fd:
+                    self.add_from_file(fd)
+            except FileNotFoundError as fnfe:
+                raise fnfe
+            except UnicodeError:
+                raise Exception(
+                    "Incorrect encoding detected in {}, please "
+                    "rebuild the dataset".format(f)
+                )
+            return
+
+        lines = f.readlines()
+        indices_start_line = self._load_meta(lines)
+
+        for line in lines[indices_start_line:]:
+            try:
+                word = line.rstrip().rsplit(" ", 1)[0]
+                if word in self:
+                    raise RuntimeError(
+                        "Duplicate word found when loading Dictionary: '{}'. "
+                        "Duplicate words can overwrite earlier ones by adding the "
+                        "#fairseq:overwrite flag at the end of the corresponding row "
+                        "in the dictionary file. If using the Camembert model, please "
+                        "download an updated copy of the model file."
+                        .format(word)
+                    )
+                self.add_symbol(word, overwrite=False)
+            except ValueError:
+                raise ValueError(
+                    "Incorrect dictionary format, expected '<token>'"
+                )
+
+    def encode_line(self, line, reverse_order=False, **unuse):
+        words = self.tokenizer(line.strip())["input_ids"]
+        if reverse_order:
+            words = list(reversed(words))
+        ids = torch.tensor(words, dtype=torch.long)
+
+        return ids
+
+    def pad(self):
+        """Helper to get index of pad symbol"""
+        return self.index(self.pad_word)
+
+    def unk(self):
+        """Helper to get index of unk symbol"""
+        return self.index(self.unk_word)
+
+
 class TruncatedDictionary(object):
     def __init__(self, wrapped_dict, length):
         self.__class__ = type(

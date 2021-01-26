@@ -7,7 +7,7 @@ import contextlib
 import torch
 import torch.nn.functional as F
 from typing import List, Tuple, Dict, Optional
-from transformers import BertForMaskedLM
+from transformers import GPT2LMHeadModel
 
 from fairseq import utils
 from fairseq.models import (
@@ -39,15 +39,6 @@ from .wav2vec2_cif import (
 )
 
 
-def padding2attention_mask(padding_mask):
-
-    mask1 = F.pad(padding_mask, [0, 1, 0, 0], value=1)
-    mask2 = F.pad(padding_mask, [1, 0, 0, 0], value=0)
-    mask = 1 - mask1.int() * mask2.int()
-
-    return F.pad(mask, [1, 0, 0, 0], value=1)
-
-
 def pred2bert_input(pred, token_mask, cls=101, sep=102):
 
     pred *= token_mask
@@ -60,16 +51,7 @@ def pred2bert_input(pred, token_mask, cls=101, sep=102):
 
 def add_lm_args(parser):
     parser.add_argument(
-        "--freeze-lm-finetune-updates", type=int, default=0, help="freeze_lm_finetune_updates"
-    )
-    parser.add_argument(
-        "--gold-rate-range", type=str, help="gold-rate-range"
-    )
-    parser.add_argument(
-        "--gold-rate-steps", type=str, help="gold-rate-steps"
-    )
-    parser.add_argument(
-        "--infer-threash", type=float, default=0.8, help="infer-threash"
+        "--freeze-lm-finetune-updates", type=int, default=100, help="freeze_lm_finetune_updates"
     )
     parser.add_argument(
         "--lambda-embedding", type=float, metavar="D", help="lambda-embedding"
@@ -83,30 +65,28 @@ def add_lm_args(parser):
     parser.add_argument("--lambda-qua", type=float, default=0.1, metavar="D", help="lambda-qua")
 
 
-@register_model("w2v_cif_bert")
-class W2V_CIF_BERT(BaseFairseqModel):
+@register_model("w2v_cif_gpt2")
+class W2V_CIF_GPT2(BaseFairseqModel):
 
-    def __init__(self, args, encoder, bert, to_vocab, tgt_dict):
+    def __init__(self, args, encoder, gpt2, tgt_dict):
         """
-        .copy_() clone to_vocab
         """
         super().__init__()
         self.encoder = encoder
-        self.bert = bert
-        self.dim_bert = bert.embeddings.word_embeddings.weight.size(1)
-        self.to_vocab = to_vocab # 768 -> 21128
-        self.to_vocab_ac = copy.deepcopy(to_vocab)
-        self.to_vocab_ctc = copy.deepcopy(to_vocab)
-        self.proj = Linear(encoder.d-1, self.dim_bert)
+        self.gpt2 = gpt2
+        self.dim_gpt2 = gpt2.transformer.wte.weight.size(1)
+        self.proj = Linear(encoder.d-1, self.dim_gpt2)
+        self.to_vocab_lm = self.gpt2.lm_head
+        self.to_vocab_ac = copy.deepcopy(self.gpt2.lm_head)
+        self.to_vocab_ctc = copy.deepcopy(self.gpt2.lm_head)
+        self.gpt2.lm_head
         self.tgt_dict = tgt_dict
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
-        self.gold_rate_range = eval(args.gold_rate_range)
-        self.gold_rate_steps = eval(args.gold_rate_steps)
 
-        for p in self.bert.embeddings.parameters():
-            p.requires_grad = False
+        # for p in self.gpt2.transformer.wte.parameters():
+        #     p.requires_grad = False
 
     @staticmethod
     def add_args(parser):
@@ -118,25 +98,23 @@ class W2V_CIF_BERT(BaseFairseqModel):
     def build_model(cls, args, task):
         """Build a new model instance."""
         # make sure all arguments are present in older models
-        w2v_cif_bert_architecture(args)
+        w2v_cif_gpt2_architecture(args)
         tgt_dict = task.target_dictionary
 
-        bert, to_vocab = cls.build_bert(args, tgt_dict)
+        gpt2 = cls.build_gpt2(args, tgt_dict)
         encoder = cls.build_encoder(args) # encoder
 
-        return cls(args, encoder, bert, to_vocab, tgt_dict)
+        return cls(args, encoder, gpt2, tgt_dict)
 
     @classmethod
     def build_encoder(cls, args, tgt_dict=None):
         return Wav2VecEncoder(args, tgt_dict=tgt_dict)
 
     @classmethod
-    def build_bert(cls, args, tgt_dict):
-        pretrained_model = BertForMaskedLM.from_pretrained(args.bert_name)
-        bert = pretrained_model.bert
-        to_vocab = pretrained_model.cls
+    def build_gpt2(cls, args, tgt_dict):
+        model = GPT2LMHeadModel.from_pretrained(args.gpt2_name)
 
-        return bert, to_vocab
+        return model
 
     def forward(self, **kwargs):
         """
@@ -153,67 +131,73 @@ class W2V_CIF_BERT(BaseFairseqModel):
         alphas = CIFFcModelV2.get_alphas(encoder_output)
 
         if self.training:
-            gold_rate = self.set_gold_rate()
             decode_length = kwargs['target_lengths']
-            gold_ids = kwargs['bert_input'].long()
-            noise = 0.0
         else:
-            gold_rate = 0.0
             decode_length = torch.round(alphas.sum(-1)).int()
-            gold_ids = None
-            noise = 0.0
-
-        _alphas, num_output = self.resize(alphas, decode_length, noise=noise)
-        padding_mask = ~utils.sequence_mask(decode_length).bool()
+        _alphas, num_output = self.resize(alphas, decode_length)
         cif_outputs = self.cif(hidden_encoded, _alphas)
         hidden_ac = self.proj(cif_outputs)
         logits_ac = self.to_vocab_ac(hidden_ac)
 
-        ft = self.freeze_lm_finetune_updates <= self.num_updates
-        with torch.no_grad() if not ft else contextlib.ExitStack():
-            logits_lm, gold_embedding, pred_mask, token_mask = self.bert_forward(
-                hidden_ac, logits_ac, padding_mask, gold_ids, gold_rate,
-                threash=self.args.infer_threash)
-        logits = self.args.lambda_am * logits_ac + self.args.lambda_lm * logits_lm
-        logits *= (~padding_mask).unsqueeze(-1).float()
+        # other inputs
+        B, T = hidden_ac.size(0), hidden_ac.size(1)
+        padding_mask = ~utils.sequence_mask(decode_length).bool()
+        mask_ac = (~padding_mask)
+        position_ac = torch.arange(T).repeat(B, 1).long().cuda()
+        type_ac = torch.ones((B, T)).long().cuda() * 102
+
+        if self.training:
+            targets = kwargs['gpt2_input']
+            token_type = torch.ones_like(targets) * 103
+            text_embs = self.gpt2.transformer.wte(targets)
+            ft = self.freeze_lm_finetune_updates <= self.num_updates
+            with torch.no_grad() if not ft else contextlib.ExitStack():
+                input_embs = torch.cat([hidden_ac, text_embs], dim=1)
+                type_ids = torch.cat([type_ac, token_type], dim=1)
+                position_ids = torch.cat([position_ac, position_ac], dim=1)
+                attention_mask = torch.cat([mask_ac, mask_ac], dim=1)[:, None, None, :]
+                outputs = self.gpt2(
+                    inputs_embeds=input_embs,
+                    token_type_ids=type_ids,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
+            logits_lm = outputs[0][:, T:, :]
+            logits = self.args.lambda_am * logits_ac + self.args.lambda_lm * logits_lm
+            logits *= (~padding_mask).unsqueeze(-1).float()
+        else:
+            past = None
+            list_logits = [logits_ac[:, 0:1, :]]
+            token_type = torch.ones_like(type_ac) * 103
+            first = torch.argmax(logits_ac, -1)[:, 0][:, None]
+            text_embs = self.gpt2.transformer.wte(first)
+            input_embs = torch.cat([hidden_ac, text_embs], dim=1)
+            type_ids = torch.cat([type_ac, token_type[:, 0:1]], dim=1)
+            position_ids = torch.cat([position_ac, position_ac[:, 0:1]], dim=1)
+            for i in range(1, T):
+                outputs = self.gpt2(
+                    past_key_values=past,
+                    inputs_embeds=input_embs,
+                    token_type_ids=type_ids,
+                    position_ids=position_ids,
+                    use_cache=True,
+                    # output_attentions=False
+                    )
+                logits_lm, past = outputs[0], outputs[1]
+                logits_i = self.args.lambda_am * logits_ac[..., -1, :] + self.args.lambda_lm * logits_lm[..., -1, :]
+                list_logits.append(logits_i.unsqueeze(1))
+                preds = torch.argmax(logits_i, -1)[:, None]
+                input_embs = self.gpt2.transformer.wte(preds)
+                type_ids = token_type[:, i:i+1]
+                position_ids = position_ac[:, i:i+1]
+            logits = torch.cat(list_logits, 1)
+            logits *= (~padding_mask).unsqueeze(-1).float()
 
         return {'logits': logits, 'len_logits': decode_length,
                 'alphas': alphas, 'num_output': num_output,
-                'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc,
-                'pred_mask': pred_mask, 'token_mask': token_mask,
-                'gold_rate': gold_rate}
+                'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc}
 
-    def bert_forward(self, hidden, logits_ac, padding_mask, gold_ids=None, gold_rate=0.0, threash=0.8):
-        """
-        """
-        device = hidden.device
-        token_mask = F.pad(~padding_mask, [1, 1, 0, 0], value=0)
-
-        if self.training:
-            input_ids = gold_ids
-            pred_mask = (torch.rand(input_ids.size(), device=device) > gold_rate) * token_mask
-        else: # infer
-            probs = F.pad(utils.softmax(logits_ac.float(), dim=-1), [0, 0, 1, 1, 0, 0], value=0)
-            confident, preds = probs.max(-1)
-            input_ids = pred2bert_input(preds, token_mask)
-            pred_mask = (confident <= threash) * token_mask
-
-        # mixing
-        gold_embedding = self.bert.embeddings.word_embeddings(input_ids)
-        hidden_mix = torch.where(pred_mask[:, :, None].repeat(1, 1, hidden.size(-1)),
-                                 F.pad(hidden, [0, 0, 1, 1, 0, 0], value=0),
-                                 gold_embedding)
-
-        attention_mask = padding2attention_mask(padding_mask)
-        embeddings = self.bert.embeddings(inputs_embeds=hidden_mix)
-        encoder_outputs = self.bert.encoder(
-            embeddings,
-            attention_mask=attention_mask[:, None, None, :])
-
-        logits = self.to_vocab(encoder_outputs[0])
-        logits = logits[:, 1:-1, :]
-
-        return logits, gold_embedding, pred_mask, token_mask
+        return logits
 
     @staticmethod
     def resize(*args, **kwargs):
@@ -246,15 +230,7 @@ class W2V_CIF_BERT(BaseFairseqModel):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
-    def set_gold_rate(self):
-        s, e = self.gold_rate_range
-        s1, s2 = self.gold_rate_steps
-        gold_rate = max((1 - max((self.num_updates - s1), 0) / s2) * (s-e), 0) + e
 
-        return gold_rate
-
-
-@register_model_architecture("w2v_cif_bert", "w2v_cif_bert")
-def w2v_cif_bert_architecture(args):
+@register_model_architecture("w2v_cif_gpt2", "w2v_cif_gpt2")
+def w2v_cif_gpt2_architecture(args):
     cif_architecture(args)
-    args.share_final_proj = getattr(args, "share_final_proj", False)

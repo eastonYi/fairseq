@@ -1,11 +1,13 @@
 . ../path.sh
 
 gpu=$1
-lm_weight=1.6
-word_score=0.7
+lm_weight=1.4
+word_score=0.5
 label_type=subword
-DATA_DIR=data/test_clean
-data_name=test_clean
+# DATA_DIR=data/test_clean
+# data_name=test_clean
+DATA_DIR=../callhome_new/data/test_en
+data_name=test
 lexicon=data/lexicon.subword.txt
 lm=data/5-gram.word.bin
 MODEL_PATH=exp/wav2vec_ctc_10h/checkpoint_best.pt
