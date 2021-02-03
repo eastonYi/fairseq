@@ -515,8 +515,17 @@ class GPT2Dictionary(Dictionary):
         if reverse_order:
             words = list(reversed(words))
         ids = torch.tensor(words, dtype=torch.long)
+        assert len(ids) > 0
 
         return ids
+
+    def bos(self):
+        """Helper to get index of pad symbol"""
+        return self.tokenizer.bos_token_id
+
+    def eos(self):
+        """Helper to get index of pad symbol"""
+        return self.tokenizer.eos_token_id
 
     def pad(self):
         """Helper to get index of pad symbol"""
@@ -525,6 +534,10 @@ class GPT2Dictionary(Dictionary):
     def unk(self):
         """Helper to get index of unk symbol"""
         return self.index(self.unk_word)
+
+    def blk(self):
+        """Helper to get index of unk symbol"""
+        return 102
 
 
 class TruncatedDictionary(object):

@@ -786,13 +786,13 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
             lprobs,
             target.long(),
             0.0,
-            ignore_index=100,
+            ignore_index=self.task.target_dictionary.pad(),
             reduce=reduction,
         )
 
         # CTC loss
         target = sample["target"]
-        pad_mask = target != 100
+        pad_mask = target != self.task.target_dictionary.pad()
         targets_flat = target.masked_select(pad_mask)
         target_lengths = sample["target_lengths"]
 
@@ -803,14 +803,14 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
                 targets_flat,
                 len_lprobs,
                 target_lengths,
-                blank=104,
+                blank=self.task.target_dictionary.blk(),
                 reduction="sum",
                 zero_infinity=True,
             )
 
         return lprobs, ctc_loss, qua_loss, ce_loss
 
-    def get_logging_output(self, sample, lprobs, e_len, loss, ctc_loss, qua_loss, ce_loss):
+    def get_logging_output(self, sample, lprobs, e_len, loss, ctc_loss, qua_loss, ce_loss, gold_rate):
         targets = sample["target"].view(-1)
         mask = targets != 100
         correct = torch.sum(
@@ -824,6 +824,7 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
             "ctc_loss": utils.item(ctc_loss.data),
             "qua_loss": utils.item(qua_loss.data),  # * sample['ntokens'],
             "ce_loss": utils.item(ce_loss.data),  # * sample['ntokens'],
+            "gold_rate": gold_rate,
             "ntokens": sample_size,
             "nsentences": sample["target"].size(0),
             "sample_size": sample_size,
@@ -863,6 +864,7 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
         if model.training:
             net_output = model(**sample["net_input"])
             num_output = torch.round(net_output["num_output"]).int()
+            gold_rate = net_output["gold_rate"]
             lprobs, ctc_loss, qua_loss, ce_loss = self.compute_loss(
                 model, net_output, sample, reduction, log_probs
             )
@@ -873,7 +875,7 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
                    self.args.lambda_ctc * ctc_loss
 
             sample_size, logging_output = self.get_logging_output(
-                sample, lprobs, e_len, loss, ctc_loss, qua_loss, ce_loss
+                sample, lprobs, e_len, loss, ctc_loss, qua_loss, ce_loss, gold_rate
             )
         else:
             import editdistance
@@ -917,6 +919,7 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         ctc_loss = sum(log.get("ctc_loss", 0) for log in logging_outputs)
         ce_loss = sum(log.get("ce_loss", 0) for log in logging_outputs)
+        gold_rate = sum(log.get("gold_rate", 0) for log in logging_outputs)
         qua_loss = sum(log.get("qua_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
@@ -935,6 +938,7 @@ class CTC_CIF_GPT2(QuantityCrossEntropyWithAccCriterionV2):
                 "ntokens": ntokens,
                 "nsentences": nsentences,
                 "sample_size": sample_size,
+                "gold_rate": gold_rate / len(logging_outputs),
                 "acc": correct_sum * 100.0 / total_sum if total_sum > 0 else 0.0,
                 "correct": correct_sum,
                 "total": total_sum,

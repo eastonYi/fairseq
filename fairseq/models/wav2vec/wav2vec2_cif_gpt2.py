@@ -62,7 +62,19 @@ def add_lm_args(parser):
     parser.add_argument(
         "--lambda-lm", type=float, default=0.2, metavar="D", help="lambda-lm"
     )
+    parser.add_argument(
+        "--gold-rate-range", type=str, help="gold-rate-range"
+    )
+    parser.add_argument(
+        "--gold-rate-steps", type=str, help="gold-rate-steps"
+    )
     parser.add_argument("--lambda-qua", type=float, default=0.1, metavar="D", help="lambda-qua")
+    parser.add_argument("--position-bias", type=int, default=0, metavar="D", help="position-bias")
+    parser.add_argument(
+        "--no-type-id",
+        action="store_true",
+        help="if set, does not learn bias for conv layers",
+    )
 
 
 @register_model("w2v_cif_gpt2")
@@ -79,14 +91,12 @@ class W2V_CIF_GPT2(BaseFairseqModel):
         self.to_vocab_lm = self.gpt2.lm_head
         self.to_vocab_ac = copy.deepcopy(self.gpt2.lm_head)
         self.to_vocab_ctc = copy.deepcopy(self.gpt2.lm_head)
-        self.gpt2.lm_head
         self.tgt_dict = tgt_dict
         self.num_updates = 0
         self.args = args
         self.freeze_lm_finetune_updates = args.freeze_lm_finetune_updates
-
-        # for p in self.gpt2.transformer.wte.parameters():
-        #     p.requires_grad = False
+        self.gold_rate_range = eval(args.gold_rate_range)
+        self.gold_rate_steps = eval(args.gold_rate_steps)
 
     @staticmethod
     def add_args(parser):
@@ -134,6 +144,7 @@ class W2V_CIF_GPT2(BaseFairseqModel):
             decode_length = kwargs['target_lengths']
         else:
             decode_length = torch.round(alphas.sum(-1)).int()
+            decode_length = torch.max(decode_length, torch.ones_like(decode_length))
         _alphas, num_output = self.resize(alphas, decode_length)
         cif_outputs = self.cif(hidden_encoded, _alphas)
         hidden_ac = self.proj(cif_outputs)
@@ -142,59 +153,69 @@ class W2V_CIF_GPT2(BaseFairseqModel):
         # other inputs
         B, T = hidden_ac.size(0), hidden_ac.size(1)
         padding_mask = ~utils.sequence_mask(decode_length).bool()
-        mask_ac = (~padding_mask)
         position_ac = torch.arange(T).repeat(B, 1).long().cuda()
-        type_ac = torch.ones((B, T)).long().cuda() * 102
+        type_ac = torch.ones((B, T)).long().cuda() * 103
+        # [batch_size, num_heads, seq_length, seq_length]
+        zeros = torch.zeros([B, 1, T, T]).cuda()
+        ones = torch.ones([T, T]).cuda()[None, None, :, :]
+        diag = torch.diag(torch.ones([T])).cuda()[None, None, :, :]
+        tril = torch.tril(torch.ones([T, T])).cuda()[None, None, :, :]
+        rm_padding_mask = (~padding_mask)[:, None, None, :] * \
+                          (~padding_mask)[:, None, None, :].permute(0, 1, 3, 2)
+        # mask_acQac = ones * rm_padding_mask
+        mask_acQac = diag * rm_padding_mask
+        mask_lmQac = diag * rm_padding_mask
+        mask_lmQlm = tril * rm_padding_mask
+        mask_ac = torch.cat([mask_acQac, zeros], dim=-1)
+        mask_lm = torch.cat([mask_lmQac, mask_lmQlm], dim=-1)
+        attention_mask = torch.cat([mask_ac, mask_lm], dim=-2)
 
         if self.training:
-            targets = kwargs['gpt2_input']
-            token_type = torch.ones_like(targets) * 103
-            text_embs = self.gpt2.transformer.wte(targets)
+            input_ids = kwargs['prev_output_tokens']
+            gold_rate = self.set_gold_rate()
+            input_ids = self.schedule_samlping(gold_rate, input_ids, logits_ac, padding_mask)
+            text_embs = self.gpt2.transformer.wte(input_ids)
             ft = self.freeze_lm_finetune_updates <= self.num_updates
             with torch.no_grad() if not ft else contextlib.ExitStack():
                 input_embs = torch.cat([hidden_ac, text_embs], dim=1)
+                token_type = torch.zeros_like(input_ids)
                 type_ids = torch.cat([type_ac, token_type], dim=1)
-                position_ids = torch.cat([position_ac, position_ac], dim=1)
-                attention_mask = torch.cat([mask_ac, mask_ac], dim=1)[:, None, None, :]
+                position_ids = torch.cat([position_ac+self.args.position_bias, position_ac], dim=1)
                 outputs = self.gpt2(
                     inputs_embeds=input_embs,
-                    token_type_ids=type_ids,
+                    token_type_ids=type_ids if not self.args.no_type_id else None,
                     position_ids=position_ids,
                     attention_mask=attention_mask,
                 )
             logits_lm = outputs[0][:, T:, :]
             logits = self.args.lambda_am * logits_ac + self.args.lambda_lm * logits_lm
-            logits *= (~padding_mask).unsqueeze(-1).float()
         else:
-            past = None
-            list_logits = [logits_ac[:, 0:1, :]]
-            token_type = torch.ones_like(type_ac) * 103
-            first = torch.argmax(logits_ac, -1)[:, 0][:, None]
-            text_embs = self.gpt2.transformer.wte(first)
+            gold_rate = 0.0
+            list_logits = []
+            token_type = torch.zeros_like(type_ac)
+            decoded = torch.ones([B, 1], device=type_ac.device, dtype=type_ac.dtype) * self.tgt_dict.bos()
+            text_embs = self.gpt2.transformer.wte(decoded)
             input_embs = torch.cat([hidden_ac, text_embs], dim=1)
-            type_ids = torch.cat([type_ac, token_type[:, 0:1]], dim=1)
-            position_ids = torch.cat([position_ac, position_ac[:, 0:1]], dim=1)
-            for i in range(1, T):
+            type_ids = torch.cat([type_ac, token_type], dim=1)
+            position_ids = torch.cat([position_ac+self.args.position_bias, position_ac], dim=1)
+            for i in range(T):
                 outputs = self.gpt2(
-                    past_key_values=past,
                     inputs_embeds=input_embs,
-                    token_type_ids=type_ids,
-                    position_ids=position_ids,
-                    use_cache=True,
-                    # output_attentions=False
-                    )
-                logits_lm, past = outputs[0], outputs[1]
-                logits_i = self.args.lambda_am * logits_ac[..., -1, :] + self.args.lambda_lm * logits_lm[..., -1, :]
+                    token_type_ids=type_ids[:, :T+i+1] if not self.args.no_type_id else None,
+                    position_ids=position_ids[:, :T+i+1],
+                    attention_mask=attention_mask[:, :, :T+i+1, :T+i+1]
+                )
+                logits_lm = outputs[0][..., -1, :]
+                logits_i = self.args.lambda_am * logits_ac[..., i, :] + self.args.lambda_lm * logits_lm
                 list_logits.append(logits_i.unsqueeze(1))
                 preds = torch.argmax(logits_i, -1)[:, None]
-                input_embs = self.gpt2.transformer.wte(preds)
-                type_ids = token_type[:, i:i+1]
-                position_ids = position_ac[:, i:i+1]
+                cur_embs = self.gpt2.transformer.wte(preds)
+                input_embs = torch.cat([input_embs, cur_embs], dim=1)
             logits = torch.cat(list_logits, 1)
-            logits *= (~padding_mask).unsqueeze(-1).float()
+        logits *= (~padding_mask).unsqueeze(-1).float()
 
         return {'logits': logits, 'len_logits': decode_length,
-                'alphas': alphas, 'num_output': num_output,
+                'alphas': alphas, 'num_output': num_output, 'gold_rate': gold_rate,
                 'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc}
 
         return logits
@@ -230,7 +251,122 @@ class W2V_CIF_GPT2(BaseFairseqModel):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
+    def set_gold_rate(self):
+        s, e = self.gold_rate_range
+        s1, s2 = self.gold_rate_steps
+        gold_rate = max((1 - max((self.num_updates - s1), 0) / s2) * (s-e), 0) + e
+
+        return gold_rate
+
+    def schedule_samlping(self, gold_rate, input_ids, logits_ac, padding_mask):
+        bos = input_ids[:, 0:1]
+        preds_ac = torch.argmax(logits_ac, -1)[:, :-1]
+        sample = torch.rand(preds_ac.size()).cuda() > gold_rate
+        mixed_input_ids = torch.where(sample, preds_ac, input_ids[:, 1:])
+        mixed_input_ids = torch.cat([bos, mixed_input_ids], dim=1) * (~padding_mask)
+
+        return mixed_input_ids
+
+
+@register_model("w2v_cif_gpt2_2")
+class W2V_CIF_GPT2_2(W2V_CIF_GPT2):
+
+    def forward(self, **kwargs):
+        """
+        encoder_output= "encoder_out": x,
+                        "encoded": encoded,
+                        "encoder_padding_mask": padding_mask,  # B x T
+                        "padding_mask": padding_mask,
+        """
+        encoder_output = self.encoder(tbc=False, **kwargs)
+        hidden_encoded = encoder_output['encoder_out'][:, :, :-1]
+        hidden_ctc = F.pad(hidden_encoded, [0, 1, 0, 0, 0, 0], value=0)
+        logits_ctc = self.to_vocab_ctc(hidden_ctc)
+        len_logits_ctc = (~encoder_output['padding_mask']).sum(-1).long()
+        alphas = CIFFcModelV2.get_alphas(encoder_output)
+
+        if self.training:
+            decode_length = kwargs['target_lengths']
+        else:
+            decode_length = torch.round(alphas.sum(-1)).int()
+            decode_length = torch.max(decode_length, torch.ones_like(decode_length))
+        _alphas, num_output = self.resize(alphas, decode_length)
+        cif_outputs = self.cif(hidden_encoded, _alphas)
+        hidden_ac = self.proj(cif_outputs)
+
+        # other inputs
+        B, T = hidden_ac.size(0), hidden_ac.size(1)
+        padding_mask = ~utils.sequence_mask(decode_length).bool()
+        position_ac = torch.arange(T).repeat(B, 1).long().cuda()
+        type_ac = torch.ones((B, T)).long().cuda() * 103
+        # [batch_size, num_heads, seq_length, seq_length]
+        zeros = torch.zeros([B, 1, T, T]).cuda()
+        ones = torch.ones([T, T]).cuda()[None, None, :, :]
+        diag = torch.diag(torch.ones([T])).cuda()[None, None, :, :]
+        tril = torch.tril(torch.ones([T, T])).cuda()[None, None, :, :]
+        rm_padding_mask = (~padding_mask)[:, None, None, :] * \
+                          (~padding_mask)[:, None, None, :].permute(0, 1, 3, 2)
+        mask_acQac = ones * rm_padding_mask
+        mask_lmQac = diag * rm_padding_mask
+        mask_lmQlm = tril * rm_padding_mask
+        mask_ac = torch.cat([mask_acQac, zeros], dim=-1)
+        mask_lm = torch.cat([mask_lmQac, mask_lmQlm], dim=-1)
+        attention_mask = torch.cat([mask_ac, mask_lm], dim=-2)
+
+        if self.training:
+            input_ids = kwargs['prev_output_tokens']
+            gold_rate = self.set_gold_rate()
+            input_ids = self.schedule_samlping(gold_rate, input_ids, logits_ac, padding_mask)
+            text_embs = self.gpt2.transformer.wte(input_ids)
+            ft = self.freeze_lm_finetune_updates <= self.num_updates
+            with torch.no_grad() if not ft else contextlib.ExitStack():
+                input_embs = torch.cat([hidden_ac, text_embs], dim=1)
+                type_ids = torch.cat([type_ac, token_type], dim=1)
+                position_ids = torch.cat([position_ac+self.args.position_bias, position_ac], dim=1)
+                outputs = self.gpt2(
+                    inputs_embeds=input_embs,
+                    token_type_ids=type_ids if not self.args.no_type_id else None,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
+            logits = outputs[0][:, T:, :]
+        else:
+            list_logits = []
+            token_type = torch.zeros_like(type_ac)
+            decoded = torch.ones([B, 1], device=type_ac.device, dtype=type_ac.dtype) * self.tgt_dict.bos()
+            text_embs = self.gpt2.transformer.wte(decoded)
+            input_embs = torch.cat([hidden_ac, text_embs], dim=1)
+            type_ids = torch.cat([type_ac, token_type], dim=1)
+            position_ids = torch.cat([position_ac+self.args.position_bias, position_ac], dim=1)
+            for i in range(T):
+                outputs = self.gpt2(
+                    inputs_embeds=input_embs,
+                    token_type_ids=type_ids[:, :T+i+1] if not self.args.no_type_id else None,
+                    position_ids=position_ids[:, :T+i+1],
+                    attention_mask=attention_mask[:, :, :T+i+1, :T+i+1]
+                )
+                logits_i = outputs[0][..., -1, :]
+                list_logits.append(logits_i.unsqueeze(1))
+                preds = torch.argmax(logits_i, -1)[:, None]
+                cur_embs = self.gpt2.transformer.wte(preds)
+                input_embs = torch.cat([input_embs, cur_embs], dim=1)
+            logits = torch.cat(list_logits, 1)
+        logits *= padding_mask.unsqueeze(-1).float()
+
+        return {'logits': logits, 'len_logits': decode_length,
+                'alphas': alphas, 'num_output': num_output, 'gold_rate': gold_rate,
+                'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc}
+
+        return logits
+
 
 @register_model_architecture("w2v_cif_gpt2", "w2v_cif_gpt2")
 def w2v_cif_gpt2_architecture(args):
     cif_architecture(args)
+    args.no_type_id = getattr(args, "no_type_id", False)
+
+
+@register_model_architecture("w2v_cif_gpt2_2", "w2v_cif_gpt2_2")
+def w2v_cif_gpt2_architecture(args):
+    cif_architecture(args)
+    args.no_type_id = getattr(args, "no_type_id", False)

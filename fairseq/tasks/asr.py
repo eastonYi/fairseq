@@ -429,12 +429,11 @@ class AudioCifGPT2Task(AudioCtcTask):
         label_path = os.path.join(self.args.data, f"{split}.{self.args.labels}")
         labels = self.load_labels(label_path)
         process_label = LabelEncoder(self.dictionary)
-        import pdb; pdb.set_trace()
         self.datasets[split] = AddTargetDataset(
             self.datasets[split],
             labels,
             pad=self.dictionary.pad(),
-            bos=None,
+            bos=self.dictionary.bos(),
             eos=None,
             batch_targets=True,
             process_label=process_label
