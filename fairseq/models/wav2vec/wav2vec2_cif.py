@@ -300,7 +300,7 @@ class CIFFcModel(BaseFairseqModel):
     #     return cif_outputs, not_padding_after_cif, sum_a
 
     @staticmethod
-    def resize(alphas, target_lengths, noise=0.4, threshold=THRESHOLD):
+    def resize(alphas, target_lengths, noise=0.0, threshold=THRESHOLD):
         """
         alpha in thresh=1.0 | (0.0, +0.21)
         target_lengths: if None, apply round and resize, else apply scaling

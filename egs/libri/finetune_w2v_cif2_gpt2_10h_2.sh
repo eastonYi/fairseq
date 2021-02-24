@@ -1,7 +1,7 @@
 gpu=$1
 W2V_PATH=../libri/wav2vec2_small.pt
 GPT='gpt2'
-SAVE_DIR=exp/finetune_w2v_cif2_gpt2_10h
+SAVE_DIR=exp/finetune_w2v_cif2_gpt2_10h_2
 DATA_DIR=data/light/gpt2_style
 label_type=word
 
@@ -16,7 +16,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 --mask-channel-prob 0.1 \
 --feature-grad-mult 0.0 --freeze-finetune-updates 500 --freeze-lm-finetune-updates 500 \
 --validate-after-updates 16000 --validate-interval 1 --save-interval 1 \
---gold-rate-steps '(10000, 20000)' --gold-rate-range '(1.0, 0.5)' \
+--gold-rate-steps '(20000, 30000)' --gold-rate-range '(1.0, 0.5)' \
 --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-08 --lr 2e-05 --lr-scheduler tri_stage \
 --warmup-steps 10000 --hold-steps 10000 --decay-steps 30000 --final-lr-scale 0.05 \
 --final-dropout 0.0 --dropout 0.0 --activation-dropout 0.1 \

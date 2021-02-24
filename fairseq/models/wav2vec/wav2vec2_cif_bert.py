@@ -178,10 +178,9 @@ class W2V_CIF_BERT(BaseFairseqModel):
         logits *= (~padding_mask).unsqueeze(-1).float()
 
         return {'logits': logits, 'len_logits': decode_length,
-                'alphas': alphas, 'num_output': num_output,
+                'alphas': alphas, 'num_output': num_output, 'gold_rate': gold_rate,
                 'logits_ctc': logits_ctc, 'len_logits_ctc': len_logits_ctc,
-                'pred_mask': pred_mask, 'token_mask': token_mask,
-                'gold_rate': gold_rate}
+                'pred_mask': pred_mask[:, 1:-1], 'token_mask': token_mask[:, 1:-1]}
 
     def bert_forward(self, hidden, logits_ac, padding_mask, gold_ids=None, gold_rate=0.0, threash=0.8):
         """

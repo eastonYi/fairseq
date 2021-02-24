@@ -9,8 +9,8 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=$gpu fairseq-train $DATA_DIR \
 --save-dir $SAVE_DIR --tensorboard-logdir $SAVE_DIR \
 --train-subset train --valid-subset dev --no-epoch-checkpoints \
 --labels $label_type --num-workers 4 --max-update 80000 \
---lambda-ctc 2.0 --lambda-qua 0.2 --lambda-lm 0.2 \
---arch w2v_cif_bert --task audio_cif_bert --criterion ctc_cif_bert --best-checkpoint-metric uer \
+--lambda-ctc 1.0 --lambda-qua 0.5 --lambda-am 0.5 --lambda-lm 0.5 \
+--arch w2v_cif_bert --task audio_cif_bert --criterion nar_qua_ctc_ce --best-checkpoint-metric uer \
 --w2v-path $W2V_PATH --bert-name $BERT --infer-threash 0.8 \
 --apply-mask --mask-selection static --mask-other 0 --mask-length 10 --mask-prob 0.1 --layerdrop 0.1 \
 --mask-channel-selection static --mask-channel-other 0 --mask-channel-length 64 --mask-channel-prob 0.5 \

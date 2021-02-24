@@ -40,13 +40,6 @@ EOS_IDX = 2
 eps = 1e-7
 THRESHOLD = 0.95
 
-def build_embedding(dictionary, embed_dim):
-    num_embeddings = len(dictionary)
-    padding_idx = dictionary.pad()
-    emb = Embedding(num_embeddings, embed_dim, padding_idx)
-
-    return emb
-
 
 def add_decoder_args(parser):
     parser.add_argument(

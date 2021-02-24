@@ -21,8 +21,8 @@ class Dictionary(object):
     def __init__(
         self,
         *,  # begin keyword-only arguments
-        bos="<s>",
         pad="<pad>",
+        bos="<s>",
         eos="</s>",
         unk="<unk>",
         extra_special_symbols=None,
@@ -31,8 +31,8 @@ class Dictionary(object):
         self.symbols = []
         self.count = []
         self.indices = {}
-        self.bos_index = self.add_symbol(bos)
         self.pad_index = self.add_symbol(pad)
+        self.bos_index = self.add_symbol(bos)
         self.eos_index = self.add_symbol(eos)
         self.unk_index = self.add_symbol(unk)
         if extra_special_symbols:
@@ -199,6 +199,10 @@ class Dictionary(object):
     def unk(self):
         """Helper to get index of unk symbol"""
         return self.unk_index
+
+    def blk(self):
+        """Helper to get index of blk symbol"""
+        return self.blk_index
 
     @classmethod
     def load(cls, f):
@@ -438,6 +442,10 @@ class BertDictionary(Dictionary):
         return self.index(self.pad_word)
 
     def unk(self):
+        """Helper to get index of unk symbol"""
+        return self.index(self.pad_word)
+
+    def blk(self):
         """Helper to get index of unk symbol"""
         return self.index(self.unk_word)
 

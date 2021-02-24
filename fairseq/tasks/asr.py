@@ -57,7 +57,7 @@ class AudioCtcTask(AudioUnsuperviseTrainingTask):
         tgt_dict = Dictionary.load(dict_path)
 
         if not args.not_add_ctc_blank:
-            tgt_dict.add_symbol("<ctc_blank>")
+            tgt_dict.blk_index = tgt_dict.add_symbol("<ctc_blank>")
 
         print("| dictionary: {} types".format(len(tgt_dict)))
         return cls(args, tgt_dict)

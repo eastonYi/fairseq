@@ -81,7 +81,8 @@ class AddTargetDataset(BaseWrapperDataset):
 
         elif self.bos is None and self.eos is None: # ctc
             target = [s["label"] for s in samples if s["id"] in indices]
-
+            collated["net_input"]["target"] = \
+                data_utils.collate_tokens(target, pad_idx=self.pad, left_pad=False)
         else:
             raise NotImplementedError('')
 
